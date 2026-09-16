@@ -816,7 +816,12 @@ export default function App() {
         targetRole={pendingRole}
         userAccounts={userAccounts}
         onSuccess={handleAuthSuccess}
-        onCancel={() => {
+        onClose={() => {
+          setIsAuthModalOpen(false);
+          setPendingRole(null);
+        }}
+        onSwitchToViewer={() => {
+          setCurrentRole('VIEWER');
           setIsAuthModalOpen(false);
           setPendingRole(null);
         }}

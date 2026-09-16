@@ -183,6 +183,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <PlusCircle className="w-3.5 h-3.5" />
             {tr.dashboard.btnNewOrder}
           </button>
+
+          <button
+            onClick={() => {
+              const headers = ['Order No', 'Customer', 'Product', 'Qty (kg)', 'Completed (kg)', 'Due Date', 'Status', 'Urgent'];
+              const rows = orders.map(o => [
+                o.order_no,
+                `"${o.customer_name}"`,
+                o.product_model,
+                o.qty_kg,
+                o.completed_good_kg,
+                o.customer_due_at,
+                o.status,
+                o.urgent ? 'YES' : 'NO'
+              ]);
+              const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+              const encodedUri = encodeURI(csvContent);
+              const link = document.createElement('a');
+              link.setAttribute('href', encodedUri);
+              link.setAttribute('download', `novolyte_schedule_orders_${new Date().toISOString().slice(0,10)}.csv`);
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 transition-colors shadow-xs"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>{lang === 'zh' ? '导出排产计划清单 (Excel)' : 'Export Schedule List'}</span>
+          </button>
         </div>
       </div>
 

@@ -14,7 +14,11 @@ import {
   Sparkles,
   ArrowRight,
   ShieldAlert,
-  Info
+  Info,
+  Printer,
+  Download,
+  FileText,
+  X
 } from 'lucide-react';
 import {
   Reactor,
@@ -85,6 +89,9 @@ export const ShiftReportingView: React.FC<ShiftReportingViewProps> = ({
   const [qcMoisturePpm, setQcMoisturePpm] = useState<number>(12); // 卡尔费休水分
   const [filledGoodKg, setFilledGoodKg] = useState<number>(selectedBatch?.good_filled_kg || 0);
   const [reportNotes, setReportNotes] = useState('');
+
+  // Print/Export Shift Report Modal state
+  const [showPrintModal, setShowPrintModal] = useState(false);
 
   // Interlock Block Message & API Receipt
   const [interlockBlockMessage, setInterlockBlockMessage] = useState<string | null>(null);
@@ -191,6 +198,32 @@ export const ShiftReportingView: React.FC<ShiftReportingViewProps> = ({
     }
   };
 
+  // Handler to export current shift report as printable HTML / Simulated PDF / CSV
+  const handleExportShiftReport = (format: 'print' | 'csv') => {
+    if (format === 'csv') {
+      const headers = ['Batch ID', 'Order No', 'Product', 'Reactor', 'Qty (kg)', 'Current Step', 'QC Status'];
+      const rows = batches.map(b => [
+        b.batch_id,
+        b.order_no,
+        b.product_model,
+        b.assigned_reactor_id,
+        b.batch_qty_kg,
+        b.current_step,
+        b.qc_status
+      ]);
+      const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement('a');
+      link.setAttribute('href', encodedUri);
+      link.setAttribute('download', `novolyte_shift_report_${new Date().toISOString().slice(0,10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else {
+      setShowPrintModal(true);
+    }
+  };
+
   return (
     <div id="shift-reporting-view" className="space-y-4 font-sans text-slate-800">
       {/* 1. View Header */}
@@ -209,23 +242,41 @@ export const ShiftReportingView: React.FC<ShiftReportingViewProps> = ({
           </p>
         </div>
 
-        {/* Batch Picker */}
-        <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-xs">
-          <span className="text-slate-500 font-medium">{tr.reporting.batchSelect}</span>
-          <select
-            value={selectedBatchId}
-            onChange={(e) => {
-              setSelectedBatchId(e.target.value);
-              setInterlockBlockMessage(null);
-            }}
-            className="bg-transparent text-slate-800 font-bold focus:outline-hidden"
+        {/* Batch Picker & Export Buttons */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-xs">
+            <span className="text-slate-500 font-medium">{tr.reporting.batchSelect}</span>
+            <select
+              value={selectedBatchId}
+              onChange={(e) => {
+                setSelectedBatchId(e.target.value);
+                setInterlockBlockMessage(null);
+              }}
+              className="bg-transparent text-slate-800 font-bold focus:outline-hidden"
+            >
+              {batches.map((b) => (
+                <option key={b.batch_id} value={b.batch_id}>
+                  {b.batch_id} | {b.product_model} ({b.assigned_reactor_id})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            onClick={() => handleExportShiftReport('print')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 transition-colors shadow-xs"
           >
-            {batches.map((b) => (
-              <option key={b.batch_id} value={b.batch_id}>
-                {b.batch_id} | {b.product_model} ({b.assigned_reactor_id})
-              </option>
-            ))}
-          </select>
+            <Printer className="w-3.5 h-3.5" />
+            <span>{lang === 'zh' ? '打印当前班次工序追踪卡 (PDF)' : 'Print Shift Tracking Sheet'}</span>
+          </button>
+
+          <button
+            onClick={() => handleExportShiftReport('csv')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold hover:bg-slate-200 transition-colors border border-slate-300"
+          >
+            <Download className="w-3.5 h-3.5 text-slate-500" />
+            <span>{lang === 'zh' ? '导出班次 Excel 明细' : 'Export Shift Excel'}</span>
+          </button>
         </div>
       </div>
 
@@ -544,6 +595,132 @@ export const ShiftReportingView: React.FC<ShiftReportingViewProps> = ({
           </form>
         </div>
       </div>
+
+      {/* Printable Shift Report / PDF Tracking Sheet Modal */}
+      {showPrintModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Printer className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-sm font-bold">
+                  {lang === 'zh' ? '车间班次工序追踪卡与离线填报表 (PDF)' : 'Shift Tracking Sheet & Offline Form'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowPrintModal(false)}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Printable Content Body */}
+            <div className="p-6 overflow-y-auto space-y-6 text-slate-800 font-sans print:p-0">
+              <div className="text-center border-b border-slate-200 pb-4">
+                <h1 className="text-lg font-bold text-slate-900">
+                  {lang === 'zh' ? 'NOVOLYTE 诺莱特电池材料 · 反应釜车间班次工序追踪与离线填报卡' : 'NOVOLYTE Reactor Shift Tracking & Offline Form'}
+                </h1>
+                <div className="flex justify-center gap-6 text-xs text-slate-500 mt-2 font-mono">
+                  <span>{lang === 'zh' ? '班次' : 'Shift'}: 甲班 (08:00 - 20:00)</span>
+                  <span>{lang === 'zh' ? '打印日期' : 'Date'}: {new Date().toISOString().slice(0, 10)}</span>
+                  <span>{lang === 'zh' ? '当前批次' : 'Batch'}: {selectedBatch.batch_id}</span>
+                </div>
+              </div>
+
+              {/* Batch Info Summary */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs">
+                <div>
+                  <span className="text-slate-500 block">{lang === 'zh' ? '订单号' : 'Order No'}</span>
+                  <strong className="font-mono text-slate-800">{selectedBatch.order_no}</strong>
+                </div>
+                <div>
+                  <span className="text-slate-500 block">{lang === 'zh' ? '产品型号' : 'Product'}</span>
+                  <strong className="text-slate-800">{selectedBatch.product_model}</strong>
+                </div>
+                <div>
+                  <span className="text-slate-500 block">{lang === 'zh' ? '反应釜' : 'Reactor'}</span>
+                  <strong className="font-mono text-blue-600">{selectedBatch.assigned_reactor_id}</strong>
+                </div>
+                <div>
+                  <span className="text-slate-500 block">{lang === 'zh' ? '批量 (kg)' : 'Qty (kg)'}</span>
+                  <strong className="font-mono text-slate-900">{selectedBatch.batch_qty_kg.toLocaleString()} kg</strong>
+                </div>
+              </div>
+
+              {/* 6 Steps Table for Offline Filling */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  {lang === 'zh' ? '六工序离线填报与签字确认栏' : '6-Step Offline Filling & Sign-off Table'}
+                </h4>
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="bg-slate-100 border-b border-slate-300 text-slate-700">
+                      <th className="p-2 border-r border-slate-300">#</th>
+                      <th className="p-2 border-r border-slate-300">{lang === 'zh' ? '工序名称' : 'Operation'}</th>
+                      <th className="p-2 border-r border-slate-300">{lang === 'zh' ? '标准工时' : 'Std Time'}</th>
+                      <th className="p-2 border-r border-slate-300">{lang === 'zh' ? '实际开始/完成时间' : 'Actual Start/End'}</th>
+                      <th className="p-2 border-r border-slate-300">{lang === 'zh' ? '过程参数记录' : 'Parameter Log'}</th>
+                      <th className="p-2">{lang === 'zh' ? '操作工签字' : 'Operator Sign'}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {PROCESS_NODES.map((node) => {
+                      const op = STEP_CODE_MAP[node.id];
+                      return (
+                        <tr key={node.id} className="border-b border-slate-200 h-10">
+                          <td className="p-2 border-r border-slate-200 font-mono text-center">0{node.id}</td>
+                          <td className="p-2 border-r border-slate-200 font-semibold">{op.name} ({op.code})</td>
+                          <td className="p-2 border-r border-slate-200 font-mono">1.5h</td>
+                          <td className="p-2 border-r border-slate-200 font-mono text-slate-400">____-____</td>
+                          <td className="p-2 border-r border-slate-200 text-slate-400">{op.code === 'QC' ? '水分: ___ ppm' : op.code === 'FILL' ? '灌装量: ___ kg' : '温度/压力: ____'}</td>
+                          <td className="p-2 text-slate-400">________</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Sign-off footer */}
+              <div className="grid grid-cols-3 gap-4 pt-6 border-t border-slate-200 text-xs text-slate-600">
+                <div>
+                  <span>{lang === 'zh' ? '生产主管签字' : 'Supervisor Sign'}:</span>
+                  <div className="h-8 border-b border-slate-400 mt-2"></div>
+                </div>
+                <div>
+                  <span>{lang === 'zh' ? '质量放行签字 (QC)' : 'QC Sign'}:</span>
+                  <div className="h-8 border-b border-slate-400 mt-2"></div>
+                </div>
+                <div>
+                  <span>{lang === 'zh' ? '当班操作工签字' : 'Operator Sign'}:</span>
+                  <div className="h-8 border-b border-slate-400 mt-2"></div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer actions */}
+            <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowPrintModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-200 transition-colors"
+              >
+                {lang === 'zh' ? '关闭' : 'Close'}
+              </button>
+              <button
+                onClick={() => {
+                  window.print();
+                }}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors shadow-xs"
+              >
+                <Printer className="w-4 h-4" />
+                <span>{lang === 'zh' ? '直接打印 / 保存为 PDF' : 'Print / Save PDF'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -19,11 +19,11 @@ import { ROLE_DEFINITIONS } from '../utils/apsEngine';
 
 interface AuthPasswordModalProps {
   isOpen: boolean;
-  targetRole: UserRole;
+  targetRole: UserRole | null;
   userAccounts: UserAccount[];
   onClose: () => void;
   onSuccess: (role: UserRole) => void;
-  onSwitchToViewer: () => void;
+  onSwitchToViewer?: () => void;
 }
 
 export const AuthPasswordModal: React.FC<AuthPasswordModalProps> = ({
@@ -34,18 +34,19 @@ export const AuthPasswordModal: React.FC<AuthPasswordModalProps> = ({
   onSuccess,
   onSwitchToViewer
 }) => {
+  const effectiveRole = targetRole || 'PLANNER';
   const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [selectedRole, setSelectedRole] = useState<UserRole>(targetRole === 'VIEWER' ? 'PLANNER' : targetRole);
+  const [selectedRole, setSelectedRole] = useState<UserRole>(effectiveRole === 'VIEWER' ? 'PLANNER' : effectiveRole);
 
   // Sync selected role when targetRole changes
   React.useEffect(() => {
-    if (targetRole !== 'VIEWER') {
-      setSelectedRole(targetRole);
+    if (effectiveRole !== 'VIEWER') {
+      setSelectedRole(effectiveRole);
     }
     setPassword('');
     setErrorMsg(null);
-  }, [targetRole, isOpen]);
+  }, [effectiveRole, isOpen]);
 
   if (!isOpen) return null;
 
@@ -198,7 +199,7 @@ export const AuthPasswordModal: React.FC<AuthPasswordModalProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onSwitchToViewer();
+                  if (onSwitchToViewer) onSwitchToViewer();
                   onClose();
                 }}
                 className="px-3 py-2 rounded-xl text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
