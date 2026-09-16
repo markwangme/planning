@@ -1,0 +1,9 @@
+// Re-export V2.0 canonical fine-chemical data from apsEngine
+export {
+  INITIAL_REACTORS,
+  INITIAL_ORDERS_V2 as INITIAL_ORDERS,
+  INITIAL_BATCH_TASKS_V2 as INITIAL_BATCH_TASKS,
+  INITIAL_RESTRICTIONS,
+  INITIAL_WASH_RULES,
+  INITIAL_PRODUCT_MODELS
+} from '../utils/apsEngine';

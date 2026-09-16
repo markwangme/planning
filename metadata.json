@@ -1,0 +1,6 @@
+{
+  "name": "智能电解液APS排产与工序追踪系统",
+  "description": "面向精细化工电解液批次生产的智能APS高级计划排程与半天工序级进度追踪系统，支持向下分批、专釜隔离硬约束、洗釜矩阵优化、甘特图编排与MES接口预留",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
