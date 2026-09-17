@@ -82,7 +82,7 @@ export const OrderManagementView: React.FC<OrderManagementViewProps> = ({
   };
 
   const targetReactor = recommendReactorForOrder(simulatedOrder, reactors, restrictions) || reactors[0];
-  const splitBatches = splitOrderBatches(simulatedOrder, targetReactor);
+  const splitBatches = splitOrderBatches(simulatedOrder, targetReactor, reactors);
   const restrictionCheck = validateReactorRestriction(productModel, targetReactor.reactor_id, restrictions);
 
   const handleSubmitOrder = (e: React.FormEvent) => {
@@ -242,7 +242,7 @@ export const OrderManagementView: React.FC<OrderManagementViewProps> = ({
                     【向下分批】算法实时演算结果:
                   </span>
                   <span className="text-[11px] bg-slate-800 px-2 py-0.5 rounded text-slate-300 font-mono">
-                    目标容积 C = {targetReactor.max_capacity}T
+                    目标容积 C = {targetReactor.max_kg / 1000}T
                   </span>
                 </div>
 
@@ -316,7 +316,7 @@ export const OrderManagementView: React.FC<OrderManagementViewProps> = ({
                 客户订单台账清单 ({orders.length} 笔)
               </h3>
               <span className="text-xs text-slate-400 font-mono">
-                总需求量: {orders.reduce((s, o) => s + o.total_qty, 0).toFixed(1)} 吨
+                总需求量: {(orders.reduce((s, o) => s + o.qty_kg, 0) / 1000).toFixed(1)} 吨
               </span>
             </div>
 
@@ -368,17 +368,17 @@ export const OrderManagementView: React.FC<OrderManagementViewProps> = ({
                         </td>
 
                         <td className="py-2.5 px-3 text-right font-mono font-bold text-cyan-300">
-                          {order.total_qty.toFixed(1)} T
+                          {(order.qty_kg / 1000).toFixed(1)} T
                         </td>
 
                         <td className="py-2.5 px-3 text-center">
                           <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-mono text-[11px] border border-slate-700">
-                            {order.split_batch_count} 批
+                            {order.split_batches.length} 批
                           </span>
                         </td>
 
                         <td className="py-2.5 px-3 font-mono text-[11px] text-slate-300">
-                          {order.due_date}
+                          {order.customer_due_at}
                         </td>
 
                         <td className="py-2.5 px-3 text-center">

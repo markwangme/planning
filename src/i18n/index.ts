@@ -93,6 +93,24 @@ export interface Translations {
     kpiOee: string;
     kpiBatches: string;
     kpiZeroWash: string;
+    // 甘特泳道看板 KPI 与时间轴标记（原先只被组件引用、字典中缺失，
+    // 导致 t.gantt.kpiTons(...) 这类函数式调用在运行期抛错、整页白屏）
+    kpiTotalVolume: string;
+    kpiTons: (n: number) => string;
+    kpiShiftLoadRate: string;
+    kpiZeroWashSaved: string;
+    kpiZeroWashBatches: (n: number) => string;
+    kpiCipOccupied: string;
+    kpiWashBatches: (n: number) => string;
+    kpiDeviationAnomaly: string;
+    kpiPendingLoop: string;
+    kpiViewDeviationMatrix: string;
+    reactorSwimlaneTitle: string;
+    todayBadge: string;
+    shiftOffBadge: string;
+    breakTooltip: (name: string, minutes: number) => string;
+    currentMarker: string;
+    freezeMarker: string;
     scopeDay: string;
     scopeWeek: string;
     scopeMonth: string;
@@ -260,6 +278,15 @@ export interface Translations {
     colDept: string;
     colRemediation: string;
   };
+
+  // Error Boundary (渲染期安全网)
+  errorBoundary: {
+    title: string;
+    description: string;
+    retry: string;
+    reload: string;
+    details: string;
+  };
 }
 
 export const i18nDict: Record<LanguageCode, Translations> = {
@@ -303,7 +330,7 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       reviewTag: '工业精细评审标杆',
       pubDraftVersion: (pub, draft) => `已发布 ${pub} / 草稿 ${draft}`,
       freezeActive: '24H 冻结区已生效',
-      btnSimulate: '排产重算',
+      btnSimulate: '生成试算草稿',
       btnWhatIf: 'What-If 对比',
       btnCtp: 'CTP 试算',
       btnExceptions: '异常监控',
@@ -349,6 +376,22 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       kpiOee: '综合稼动率',
       kpiBatches: '排产批次数',
       kpiZeroWash: '同型号免洗批次',
+      kpiTotalVolume: '排产总量',
+      kpiTons: (n: number) => `${n} 批`,
+      kpiShiftLoadRate: '班次负荷率',
+      kpiZeroWashSaved: '同型号免洗节省',
+      kpiZeroWashBatches: (n: number) => `${n} 批免洗`,
+      kpiCipOccupied: 'CIP 清洗占用',
+      kpiWashBatches: (n: number) => `${n} 批需洗`,
+      kpiDeviationAnomaly: '计划偏差异常',
+      kpiPendingLoop: '待闭环原因说明',
+      kpiViewDeviationMatrix: '查看偏差清单 →',
+      reactorSwimlaneTitle: '反应釜设备泳道',
+      todayBadge: '今日',
+      shiftOffBadge: '停班',
+      breakTooltip: (name: string, minutes: number) => `产线休息：${name}（${minutes} 分钟）`,
+      currentMarker: '当前时刻',
+      freezeMarker: '24H 冻结线',
       scopeDay: '日 (24H)',
       scopeWeek: '周 (7天)',
       scopeMonth: '月 (30天)',
@@ -505,6 +548,15 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       colSeverity: '严重等级',
       colDept: '责任角色 / 部门',
       colRemediation: '整改处置建议'
+    },
+
+    // Error Boundary (渲染期安全网)
+    errorBoundary: {
+      title: '页面渲染出错',
+      description: '该视图在渲染时抛出异常，已被安全网拦截，其余功能不受影响。可点击重试，或切换到其它标签页后自动恢复。',
+      retry: '重试',
+      reload: '重新加载页面',
+      details: '技术详情'
     }
   },
 
@@ -594,6 +646,22 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       kpiOee: 'Avg OEE',
       kpiBatches: 'Total Batches',
       kpiZeroWash: 'Zero-Wash Batches',
+      kpiTotalVolume: 'Total Volume',
+      kpiTons: (n: number) => `${n} batches`,
+      kpiShiftLoadRate: 'Shift Load Rate',
+      kpiZeroWashSaved: 'Saved by Zero-Wash',
+      kpiZeroWashBatches: (n: number) => `${n} zero-wash`,
+      kpiCipOccupied: 'CIP Occupied',
+      kpiWashBatches: (n: number) => `${n} wash batches`,
+      kpiDeviationAnomaly: 'Plan Deviation Alerts',
+      kpiPendingLoop: 'Pending root-cause closure',
+      kpiViewDeviationMatrix: 'View deviation list →',
+      reactorSwimlaneTitle: 'Reactor Swimlanes',
+      todayBadge: 'TODAY',
+      shiftOffBadge: 'Off',
+      breakTooltip: (name: string, minutes: number) => `Line break: ${name} (${minutes} min)`,
+      currentMarker: 'NOW',
+      freezeMarker: '24H Freeze',
       scopeDay: 'Day (24H)',
       scopeWeek: 'Week (7D)',
       scopeMonth: 'Month (30D)',
@@ -750,6 +818,15 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       colSeverity: 'Severity',
       colDept: 'Responsible Role / Dept',
       colRemediation: 'Remediation Action'
+    },
+
+    // Error Boundary (render-time safety net)
+    errorBoundary: {
+      title: 'Page failed to render',
+      description: 'This view threw an error while rendering and was caught by the safety net. Other features are unaffected — retry, or switch tabs to recover automatically.',
+      retry: 'Retry',
+      reload: 'Reload page',
+      details: 'Technical details'
     }
   },
 
@@ -839,6 +916,22 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       kpiOee: 'Purata OEE',
       kpiBatches: 'Jumlah Kelompok',
       kpiZeroWash: 'Kelompok Tanpa Cuci',
+      kpiTotalVolume: 'Jumlah Isipadu',
+      kpiTons: (n: number) => `${n} kelompok`,
+      kpiShiftLoadRate: 'Kadar Beban Syif',
+      kpiZeroWashSaved: 'Penjimatan Tanpa Cuci',
+      kpiZeroWashBatches: (n: number) => `${n} kelompok tanpa cuci`,
+      kpiCipOccupied: 'CIP Diduduki',
+      kpiWashBatches: (n: number) => `${n} kelompok cuci`,
+      kpiDeviationAnomaly: 'Amaran Sisihan Pelan',
+      kpiPendingLoop: 'Menunggu penutupan punca',
+      kpiViewDeviationMatrix: 'Lihat senarai sisihan →',
+      reactorSwimlaneTitle: 'Lorong Reaktor',
+      todayBadge: 'HARI INI',
+      shiftOffBadge: 'Tutup',
+      breakTooltip: (name: string, minutes: number) => `Rehat barisan: ${name} (${minutes} minit)`,
+      currentMarker: 'KINI',
+      freezeMarker: 'Beku 24J',
       scopeDay: 'Hari (24J)',
       scopeWeek: 'Minggu (7H)',
       scopeMonth: 'Bulan (30H)',
@@ -995,6 +1088,15 @@ export const i18nDict: Record<LanguageCode, Translations> = {
       colSeverity: 'Tahap Kritikal',
       colDept: 'Peranan / Jabatan Bertanggungjawab',
       colRemediation: 'Cadangan Tindakan Pemulihan'
+    },
+
+    // Error Boundary (jaring keselamatan semasa render)
+    errorBoundary: {
+      title: 'Halaman gagal dipaparkan',
+      description: 'Paparan ini menghadapi ralat semasa render dan telah ditangkap oleh jaring keselamatan. Ciri lain tidak terjejas — cuba lagi, atau tukar tab untuk pulih secara automatik.',
+      retry: 'Cuba lagi',
+      reload: 'Muat semula halaman',
+      details: 'Butiran teknikal'
     }
   }
 };

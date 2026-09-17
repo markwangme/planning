@@ -9,6 +9,10 @@
  */
 
 import {
+  APS_SCHEMA_VERSION,
+  resolveWorkshopId,
+} from '../shared/apsMasterData';
+import {
   Reactor,
   ProductionOrder,
   BatchTask,
@@ -69,7 +73,22 @@ export interface ApsDatabase {
 }
 
 const DB_STORAGE_KEY = 'novolyte_aps_production_db_v2';
-const DB_SCHEMA_VERSION = 2;
+const DB_SCHEMA_VERSION = APS_SCHEMA_VERSION;
+
+function getBrowserStorage(): Storage | null {
+  if (typeof window === 'undefined' || !('localStorage' in window)) return null;
+  try {
+    return window.localStorage;
+  } catch {
+    // Browser privacy mode or a restrictive storage policy can throw here.
+    return null;
+  }
+}
+
+// 说明：此处曾有一版「幻影设备清理」迁移（强制删除 R-6000-03 并改挂批次）。
+// 口径明确为「釜台数依据后台维护的信息为准」后，该迁移已移除 ——
+// 管理员新增或保留的设备必须原样尊重，不得被代码静默删除。
+// 设备与批次的引用一致性问题改由非破坏性的 findOrphanReactorIds() 检测上报。
 
 /**
  * 获取系统标准出厂基准数据库
@@ -108,8 +127,10 @@ export function getDefaultDatabase(): ApsDatabase {
  * 从持久化存储中读取数据库
  */
 export function loadDatabase(): ApsDatabase {
+  const storage = getBrowserStorage();
+  if (!storage) return getDefaultDatabase();
   try {
-    const raw = localStorage.getItem(DB_STORAGE_KEY);
+    const raw = storage.getItem(DB_STORAGE_KEY);
     if (!raw) {
       const defaultDb = getDefaultDatabase();
       saveDatabaseToStorage(defaultDb);
@@ -124,16 +145,26 @@ export function loadDatabase(): ApsDatabase {
     const parsedReactors = Array.isArray(parsed.reactors) && parsed.reactors.length > 0
       ? parsed.reactors.map((r: any) => ({
           ...r,
-          workshop_id: r.workshop_id || (r.reactor_id === 'R-6000-02' || r.reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01')
+          workshop_id: r.workshop_id || (resolveWorkshopId(r.reactor_id))
         }))
       : defaultDb.reactors;
 
-    const parsedBatches = Array.isArray(parsed.batches) && parsed.batches.length > 0
+    let parsedBatches = Array.isArray(parsed.batches) && parsed.batches.length > 0
       ? parsed.batches.map((b: any) => ({
           ...b,
-          workshop_id: b.workshop_id || (b.assigned_reactor_id === 'R-6000-02' || b.assigned_reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01')
+          workshop_id: b.workshop_id || (resolveWorkshopId(b.assigned_reactor_id))
         }))
       : defaultDb.batches;
+
+    // One-time repair for the shipped demo snapshot from the previous schema:
+    // SIM-SO-002 is 7.3t and its second batch was incorrectly persisted as 6t.
+    // Keep this migration narrow so user-maintained production data is not
+    // silently rebalanced during startup.
+    parsedBatches = parsed.schemaVersion < 4 ? parsedBatches.map((batch: any) =>
+      batch.batch_id === 'SIM-B004-R3' && batch.order_no === 'SIM-SO-002'
+        ? { ...batch, batch_qty_kg: 1300, assigned_reactor_id: 'R-1300-01', workshop_id: 'WS-01' }
+        : batch
+    ) : parsedBatches;
 
     const merged: ApsDatabase = {
       ...defaultDb,
@@ -167,13 +198,15 @@ export function loadDatabase(): ApsDatabase {
  * 将数据库即时写入本地持久化存储
  */
 export function saveDatabaseToStorage(db: ApsDatabase): boolean {
+  const storage = getBrowserStorage();
+  if (!storage) return false;
   try {
     const updatedDb: ApsDatabase = {
       ...db,
       schemaVersion: DB_SCHEMA_VERSION,
       lastSavedAt: new Date().toISOString()
     };
-    localStorage.setItem(DB_STORAGE_KEY, JSON.stringify(updatedDb));
+    storage.setItem(DB_STORAGE_KEY, JSON.stringify(updatedDb));
 
     // 异步尝试同步至服务端 (静默同步)
     syncDatabaseToServer(updatedDb).catch(() => {});
@@ -224,7 +257,14 @@ export async function fetchDatabaseFromServer(): Promise<ApsDatabase | null> {
  */
 export function resetDatabaseToDefault(): ApsDatabase {
   const defaultDb = getDefaultDatabase();
-  localStorage.setItem(DB_STORAGE_KEY, JSON.stringify(defaultDb));
+  const storage = getBrowserStorage();
+  if (storage) {
+    try {
+      storage.setItem(DB_STORAGE_KEY, JSON.stringify(defaultDb));
+    } catch {
+      // The server-side reset below remains authoritative when browser storage is unavailable.
+    }
+  }
   try {
     fetch('/api/database/reset', { method: 'POST' }).catch(() => {});
   } catch {}

@@ -1,3 +1,4 @@
+import { resolveWorkshopId } from '../shared/apsMasterData';
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   CalendarClock,
@@ -43,8 +44,11 @@ import {
   formatMinutesToDate,
   calculateBatchDeviation,
   getShiftDurationHours,
+  isMinuteInShiftBreak,
+  isMinuteInWorkingTime,
   DEFAULT_SHIFTS
 } from '../utils/apsEngine';
+import { exportIndustrialGanttExcel } from '../utils/excelExport';
 
 export type BoardScope = '30DAYS' | '14DAYS' | '7DAYS' | 'ALL';
 export type SlotWidthLevel = 'COMPACT' | 'STANDARD' | 'COMFORT' | 'EXPANDED';
@@ -149,6 +153,8 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
     const weekDaysEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const weekDaysMs = ['Ahd', 'Isn', 'Sel', 'Rab', 'Kha', 'Jum', 'Sab'];
     const weekDays = lang === 'zh' ? weekDaysZh : lang === 'en' ? weekDaysEn : weekDaysMs;
+    const now = new Date();
+    const todayDateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     for (let i = 0; i < daysCount; i++) {
       const dMin = startMin + i * 1440;
@@ -164,7 +170,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
         dateStr,
         displayLabel: `${M}/${D}`, // Exactly matches "4/1", "4/2", "4/3" from Image 2
         dayOfWeekZh: weekDays[dObj.getDay()],
-        isToday: dateStr === '2026-09-14',
+        isToday: dateStr === todayDateStr,
         startMin: dMin
       });
     }
@@ -175,7 +181,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
       totalWindowMinutes: totalMins,
       daysList: list
     };
-  }, [baseDateStr, daysCount]);
+  }, [baseDateStr, daysCount, lang]);
 
   // 4 shift intervals per day matching Image 2
   // Image 2 has 4 columns:
@@ -226,6 +232,23 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
   const totalTimelineCols = daysCount * 4;
   const totalTimelineWidthPx = totalTimelineCols * slotWidthPx;
 
+  // 只用于时间表头提示：订单条本身仍保持原计划起止时长，不缩短、不拆段。
+  const restIntervals = useMemo(() => {
+    const intervals: { startMin: number; endMin: number }[] = [];
+    let start: number | null = null;
+    for (let minute = timelineStartMin; minute < timelineEndMin; minute += 1) {
+      // 班中午休/晚餐等 1~2 小时不标记；这里只标记整段班次停工或周末放假。
+      const isRest = !isMinuteInWorkingTime(minute, shifts) && !isMinuteInShiftBreak(minute, shifts).isBreak;
+      if (isRest && start === null) start = minute;
+      if (!isRest && start !== null) {
+        intervals.push({ startMin: start, endMin: minute });
+        start = null;
+      }
+    }
+    if (start !== null) intervals.push({ startMin: start, endMin: timelineEndMin });
+    return intervals;
+  }, [timelineStartMin, timelineEndMin, shifts]);
+
   // Sync scroll handlers
   const handleMainScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
@@ -270,7 +293,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
     if (!reactors || reactors.length === 0) return [];
     if (currentWorkshopId === 'ALL') return reactors;
     const filtered = reactors.filter((r) => {
-      const wId = r.workshop_id || (r.reactor_id === 'R-6000-02' || r.reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01');
+      const wId = r.workshop_id || (resolveWorkshopId(r.reactor_id));
       return wId === currentWorkshopId;
     });
     return filtered.length > 0 ? filtered : reactors;
@@ -281,32 +304,26 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
     return workshopReactors.filter((r) => r.reactor_id === selectedReactorFilter);
   }, [workshopReactors, selectedReactorFilter]);
 
-  // Reactor alias and category mappings matching Image 2 (e.g. Reactor "A", Category "TR410ASolven", etc.)
+  // Reactor alias and category mappings matching the industrial board.
   const reactorDisplayMeta = useMemo(() => {
     const meta: Record<string, { code: string; category: string; fullTitle: string; defaultModel: string }> = {
       'R-1300-01': {
         code: 'A',
-        category: 'TR410ASolven',
+        category: '',
         fullTitle: '1.3 t 反应釜 (小试/特种线)',
         defaultModel: 'SIM-MODEL-A'
       },
       'R-6000-01': {
         code: 'B',
-        category: 'TR410BSolven',
+        category: '',
         fullTitle: '6 t 反应釜 #1 (动力主线 1号)',
         defaultModel: 'SIM-MODEL-B'
       },
       'R-6000-02': {
         code: 'C',
-        category: 'TR410ASolven',
+        category: '',
         fullTitle: '6 t 反应釜 #2 (动力主线 2号 / 专属釜)',
         defaultModel: 'SIM-MODEL-SPECIAL-S'
-      },
-      'R-6000-03': {
-        code: 'D',
-        category: 'TR410BSolven',
-        fullTitle: '6 t 反应釜 #3 (储能与高压配制釜)',
-        defaultModel: 'SIM-MODEL-A'
       }
     };
     reactors.forEach((r, idx) => {
@@ -350,9 +367,12 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
     const totals: Record<string, { planKg: number; actualKg: number; planTons: number; actualTons: number }> = {};
     reactors.forEach((r) => {
       const rBatches = batchesByReactor[r.reactor_id] || [];
-      const planKg = rBatches.reduce((sum, b) => sum + (b.target_quantity_kg || 0), 0);
-      const actualKg = rBatches.filter(b => b.status === 'COMPLETED' || b.status === 'RUNNING')
-        .reduce((sum, b) => sum + ((b.target_quantity_kg || 0) * (b.progress_percent || 0) / 100), 0);
+      const planKg = rBatches.reduce((sum, b) => sum + (Number(b.batch_qty_kg) || 0), 0);
+      const actualKg = rBatches.reduce((sum, b) => {
+        // BatchTask has no legacy status/progress_percent fields. Derive actual
+        // quantity from the canonical execution fields instead.
+        return sum + (Number(b.good_filled_kg) || 0);
+      }, 0);
       totals[r.reactor_id] = {
         planKg,
         actualKg,
@@ -487,6 +507,21 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
               {lang === 'zh' ? '宽松' : lang === 'en' ? 'Comfort' : 'Selesa'}
             </button>
           </div>
+
+          <button
+            onClick={() => void exportIndustrialGanttExcel({
+              reactors: filteredReactors,
+              batches: filteredReactors.flatMap((reactor) => batchesByReactor[reactor.reactor_id] || []),
+              shifts,
+              baseDateStr,
+              daysCount
+            })}
+            className="flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-2xs transition-colors"
+            title="导出当前工业标准看板为 Excel"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>{lang === 'zh' ? '导出 Excel' : 'Export Excel'}</span>
+          </button>
 
           {/* Recalculate Schedule Button */}
           {onAutoSchedule && (
@@ -670,7 +705,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
                   {shiftIntervalsConfig.map((slot) => (
                     <th
                       key={`slot-${day.dateStr}-${slot.code}`}
-                      className={`border border-slate-400 p-0 text-center font-mono font-bold select-none overflow-hidden ${slot.bgClass}`}
+                      className={`relative border border-slate-400 p-0 text-center font-mono font-bold select-none overflow-hidden ${slot.bgClass}`}
                       style={{
                         width: `${slotWidthPx}px`,
                         minWidth: `${slotWidthPx}px`,
@@ -679,6 +714,30 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
                       }}
                       title={`${day.displayLabel} ${slot.label}`}
                     >
+                      {restIntervals
+                        .filter((interval) => {
+                          const slotStart = day.startMin + slot.startHour * 60;
+                          const slotEnd = day.startMin + slot.endHour * 60;
+                          return interval.endMin > slotStart && interval.startMin < slotEnd;
+                        })
+                        .map((interval) => {
+                          const slotStart = day.startMin + slot.startHour * 60;
+                          const slotEnd = day.startMin + slot.endHour * 60;
+                          const overlapStart = Math.max(interval.startMin, slotStart);
+                          const overlapEnd = Math.min(interval.endMin, slotEnd);
+                          return (
+                            <div
+                              key={`rest-header-${day.dateStr}-${slot.code}-${interval.startMin}`}
+                              className="absolute inset-y-0 z-10 bg-slate-500/75 text-white flex items-center justify-center pointer-events-none"
+                              style={{
+                                left: `${((overlapStart - slotStart) / (slotEnd - slotStart)) * 100}%`,
+                                width: `${((overlapEnd - overlapStart) / (slotEnd - slotStart)) * 100}%`
+                              }}
+                              title="生产休息时间"
+                            >
+                            </div>
+                          );
+                        })}
                       <div
                         className="w-full h-full flex items-center justify-center text-[9px] leading-none tracking-tighter"
                         style={{
@@ -701,7 +760,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
               const rBatches = batchesByReactor[reactor.reactor_id] || [];
               const meta = reactorDisplayMeta[reactor.reactor_id] || {
                 code: String.fromCharCode(65 + rIdx),
-                category: 'TR410ASolven',
+                category: '',
                 fullTitle: reactor.reactor_name,
                 defaultModel: 'SIM-MODEL-A'
               };
@@ -730,7 +789,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
                       className="sticky left-[90px] z-20 bg-white border border-slate-400 px-2 py-2 text-center align-middle font-semibold text-slate-800 text-xs shadow-xs"
                       style={{ width: '130px', minWidth: '130px', maxWidth: '130px' }}
                     >
-                      <div className="font-bold text-slate-900 text-xs">{meta.category}</div>
+                      {meta.category && <div className="font-bold text-slate-900 text-xs">{meta.category}</div>}
                       <div className="text-[10px] text-slate-500 truncate mt-0.5" title={reactor.reactor_name}>
                         {reactor.reactor_name}
                       </div>
@@ -809,7 +868,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
 
                           const isSelected = selectedBatchId === batch.batch_id;
                           const seqNum = bIdx + 1; // 1-, 2-, 3- sequence prefix matching Image 2!
-                          const tonnageT = Math.round(batch.target_quantity_kg / 1000);
+                          const tonnageT = Math.round((Number(batch.batch_qty_kg) || 0) / 1000);
 
                           return (
                             <React.Fragment key={`batch-block-${batch.batch_id}`}>
@@ -859,7 +918,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
                                     onOpenBatchModal(batch);
                                   }
                                 }}
-                                title={`批次: ${batch.batch_id}\n型号: ${batch.product_model} (${batch.product_name})\n重量: ${batch.target_quantity_kg}kg (${tonnageT}T)\n时间: ${batch.plan_start_time} ~ ${batch.plan_end_time}\n客户: ${batch.customer_name}`}
+                                title={`批次: ${batch.batch_id}\n型号: ${batch.product_model} (${batch.product_name})\n重量: ${batch.batch_qty_kg}kg (${tonnageT}T)\n时间: ${batch.plan_start_time} ~ ${batch.plan_end_time}\n客户: ${batch.customer_name}`}
                               >
                                 {/* Left Content: Red Index Badge + Batch Code / Model + Tonnage */}
                                 <div className="flex items-center gap-0.5 truncate font-mono text-[11px] font-bold">
@@ -941,8 +1000,13 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
                           const leftPx = (offsetMinutes / totalWindowMinutes) * totalTimelineWidthPx;
                           const widthPx = Math.max(24, (durationMinutes / totalWindowMinutes) * totalTimelineWidthPx);
 
-                          const isCompleted = batch.status === 'COMPLETED';
-                          const isRunning = batch.status === 'RUNNING';
+                          const isCompleted = batch.step_status === 'FINISHED' || Boolean(batch.actual_end_time);
+                          const isRunning = batch.step_status === 'PROCESSING' || (batch.is_actual && !batch.actual_end_time);
+                          const progressPercent = isCompleted
+                            ? 100
+                            : batch.current_step > 1
+                              ? Math.min(99, Math.round(((batch.current_step - 1) / 5) * 100))
+                              : 0;
 
                           return (
                             <div
@@ -962,7 +1026,7 @@ export const IndustrialGanttBoard: React.FC<IndustrialGanttBoardProps> = ({
                                 onSelectBatch(batch);
                                 if (onOpenBatchModal) onOpenBatchModal(batch);
                               }}
-                              title={`[实际执行] ${batch.batch_id}: ${isCompleted ? '已完成 100%' : isRunning ? `生产中 ${batch.progress_percent || 0}%` : '待执行'}`}
+                              title={`[实际执行] ${batch.batch_id}: ${isCompleted ? '已完成 100%' : isRunning ? `生产中 ${progressPercent}%` : '待执行'}`}
                             >
                               <span className="truncate">
                                 {isCompleted ? `✓ ${batch.batch_id}` : isRunning ? `▶ ${batch.batch_id}` : batch.batch_id}

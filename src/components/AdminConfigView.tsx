@@ -13,9 +13,10 @@ import {
   SpecialScope,
   WorkshopDef,
   UserAccount,
+  BatchTask,
   WORKSHOP_DEFINITIONS
 } from '../types/aps';
-import { ROLE_DEFINITIONS, DEFAULT_USER_ACCOUNTS, getShiftDurationHours } from '../utils/apsEngine';
+import { ROLE_DEFINITIONS, DEFAULT_USER_ACCOUNTS, getShiftDurationHours, getShiftBreakDefinitions } from '../utils/apsEngine';
 import {
   Settings,
   Shield,
@@ -79,6 +80,8 @@ interface AdminConfigViewProps {
   lastDbSaveTime?: string;
   orderCount?: number;
   batchCount?: number;
+  /** 在制批次，用于阻止删除仍被占用的设备 */
+  batches?: BatchTask[];
 }
 
 export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
@@ -109,7 +112,8 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
   onResetDatabase,
   lastDbSaveTime,
   orderCount = 4,
-  batchCount = 8
+  batchCount = 8,
+  batches = []
 }) => {
   const [activeSection, setActiveSection] = useState<
     'workshops' | 'users' | 'system' | 'reactors' | 'products' | 'process_nodes' | 'shifts' | 'staffing' | 'wash_rules' | 'database'
@@ -120,6 +124,7 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
   const [localReactors, setLocalReactors] = useState<Reactor[]>(reactors);
   const [localWorkshops, setLocalWorkshops] = useState<WorkshopDef[]>(workshops);
   const [localUserAccounts, setLocalUserAccounts] = useState<UserAccount[]>(userAccounts);
+  const [passwordDrafts, setPasswordDrafts] = useState<Record<string, { next: string; confirm: string }>>({});
   const [localProductModels, setLocalProductModels] = useState<ProductModelDef[]>(productModels);
   const [localProcessNodes, setLocalProcessNodes] = useState<ProcessNodeDef[]>(processNodes);
   const [localShifts, setLocalShifts] = useState<ShiftDef[]>(shifts);
@@ -293,15 +298,85 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
     alert('反应釜台账与物理信息已更新，系统已自动按新设备参数重新排产！');
   };
 
+  /**
+   * 删除设备。
+   *
+   * 口径：釜台数以后台维护为准，因此管理端必须能删除误录设备。
+   * 但删除会直接影响在制批次与型号白名单，故先做占用检查，不允许带引用删除。
+   */
+  const handleDeleteReactor = (reactor: Reactor) => {
+    const occupiedBatches = batches.filter((b) => b.assigned_reactor_id === reactor.reactor_id);
+    const whitelistedModels = localProductModels.filter((m) =>
+      (m.allowed_reactors || []).includes(reactor.reactor_id)
+    );
+
+    const blockers: string[] = [];
+    if (occupiedBatches.length > 0) {
+      blockers.push(
+        `仍有 ${occupiedBatches.length} 个在制批次占用：${occupiedBatches
+          .slice(0, 5)
+          .map((b) => b.batch_id)
+          .join('、')}${occupiedBatches.length > 5 ? ' 等' : ''}`
+      );
+    }
+    if (whitelistedModels.length > 0) {
+      blockers.push(
+        `仍被 ${whitelistedModels.length} 个型号的设备白名单引用：${whitelistedModels
+          .slice(0, 5)
+          .map((m) => m.model_code)
+          .join('、')}${whitelistedModels.length > 5 ? ' 等' : ''}`
+      );
+    }
+
+    if (blockers.length > 0) {
+      alert(
+        `无法删除设备 ${reactor.reactor_id}：\n\n${blockers
+          .map((b) => `· ${b}`)
+          .join('\n')}\n\n请先解除上述占用与白名单引用，再删除该设备。`
+      );
+      return;
+    }
+
+    if (localReactors.length <= 1) {
+      alert('至少需保留一台设备，无法删除最后一台反应釜。');
+      return;
+    }
+
+    if (
+      !confirm(
+        `确认删除设备 ${reactor.reactor_id}（${reactor.reactor_name}）？\n\n` +
+          '删除后将立即按剩余设备重新排产，此操作不可撤销。'
+      )
+    ) {
+      return;
+    }
+
+    const updated = localReactors.filter((r) => r.reactor_id !== reactor.reactor_id);
+    setLocalReactors(updated);
+    onUpdateReactors(updated);
+    onTriggerAutoSchedule();
+  };
+
   // Add new reactor
-  const handleAddNewReactor = () => {
-    if (!newReactorDraft.reactor_id || !newReactorDraft.reactor_name) {
+  const handleAddNewReactor = () => {    if (!newReactorDraft.reactor_id || !newReactorDraft.reactor_name) {
       alert('请输入反应釜编号与名称');
+      return;
+    }
+    // 设备编号是排产与批次归属的主键，必须唯一
+    if (localReactors.some((r) => r.reactor_id === newReactorDraft.reactor_id)) {
+      alert(`设备编号 ${newReactorDraft.reactor_id} 已存在，请使用其他编号。`);
+      return;
+    }
+    const draftMin = Number(newReactorDraft.min_kg);
+    const draftMax = Number(newReactorDraft.max_kg) || Number(newReactorDraft.rated_kg);
+    if (Number.isFinite(draftMin) && draftMin > 0 && draftMin > draftMax) {
+      alert(`最小投料量 ${draftMin} kg 不得大于最大投料量 ${draftMax} kg。`);
       return;
     }
     const reactor: Reactor = {
       reactor_id: newReactorDraft.reactor_id,
       reactor_name: newReactorDraft.reactor_name,
+      workshop_id: newReactorDraft.workshop_id || localWorkshops[0]?.id || 'WS-01',
       rated_kg: Number(newReactorDraft.rated_kg) || 6000,
       min_kg: Number(newReactorDraft.min_kg) || 2000,
       max_kg: Number(newReactorDraft.max_kg) || 6000,
@@ -488,7 +563,17 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
   };
 
   // Save User Accounts & Passwords (Requirement 5)
-  const handleUpdateUserPassword = (role: UserRole, newPass: string) => {
+  const handleSaveUserPassword = (role: UserRole) => {
+    const draft = passwordDrafts[role] || { next: '', confirm: '' };
+    const newPass = draft.next.trim();
+    if (newPass.length < 8) {
+      triggerFeedback('新密码至少需要 8 个字符', 'warn');
+      return;
+    }
+    if (newPass !== draft.confirm.trim()) {
+      triggerFeedback('两次输入的新密码不一致', 'warn');
+      return;
+    }
     const updated = localUserAccounts.map(acc => {
       if (acc.role === role) {
         return { ...acc, passwordHash: newPass };
@@ -497,8 +582,36 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
     });
     setLocalUserAccounts(updated);
     if (onUpdateUserAccounts) onUpdateUserAccounts(updated);
+    setPasswordDrafts((prev) => ({ ...prev, [role]: { next: '', confirm: '' } }));
     triggerFeedback(`角色【${ROLE_DEFINITIONS[role]?.name || role}】独立密码已更新！`, 'success');
   };
+
+  const updateShiftBreaks = (idx: number, breaks: ShiftDef['breaks']) => {
+    const nextBreaks = breaks || [];
+    const totalMinutes = nextBreaks.reduce((sum, item) => sum + (Number(item.durationMinutes) || 0), 0);
+    setLocalShifts((prev) => prev.map((item, i) => i === idx ? {
+      ...item,
+      breaks: nextBreaks,
+      // Keep legacy fields synchronized for old exports and older clients.
+      breakMinutes: totalMinutes,
+      breakStartTime: nextBreaks[0]?.startTime || '',
+      breakName: nextBreaks[0]?.name || item.breakName
+    } : item));
+  };
+
+  const updateWorkingDay = (day: number, enabled: boolean) => {
+    setLocalShifts((prev) => prev.map((shift) => {
+      const currentDays = Array.isArray(shift.workingDays) ? shift.workingDays : [0, 1, 2, 3, 4, 5, 6];
+      const nextDays = enabled
+        ? Array.from(new Set([...currentDays, day])).sort((a, b) => a - b)
+        : currentDays.filter((item) => item !== day);
+      return { ...shift, workingDays: nextDays };
+    }));
+  };
+
+  const isWorkingDay = (day: number) => localShifts.length === 0 || localShifts.every((shift) =>
+    !Array.isArray(shift.workingDays) || shift.workingDays.includes(day)
+  );
 
   // Save Wash Rules
   const handleSaveWashRules = () => {
@@ -1065,12 +1178,12 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                             value={workshopEditDraft.description || ''}
                             onChange={(e) => setWorkshopEditDraft({ ...workshopEditDraft, description: e.target.value })}
                             placeholder="如：涵盖小试/特种试产釜 (R-1300-01) 及量产动力电解液主力釜 (R-6000-01)"
-                            className="w-full text-xs font-medium border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white text-slate-900 focus:outline-hidden focus:border-indigo-600 resize-none"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  );
+                             className="w-full text-xs font-medium border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white text-slate-900 focus:outline-hidden focus:border-indigo-600 resize-none"
+                           />
+                         </div>
+                       </div>
+                     </div>
+                   );
                 }
 
                 return (
@@ -1164,7 +1277,7 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                   <span>反应釜所属车间划拨调整矩阵 (Reactor Assignment)</span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  管理员可随时调整任一反应釜（如 R-1300-01, R-6000-01, R-6000-02, R-6000-03）所属车间，划拨后排产看板与甘特图将自动按车间分类联动。
+                  管理员可随时调整任一反应釜（如 R-1300-01, R-6000-01, R-6000-02）所属车间，划拨后排产看板与甘特图将自动按车间分类联动。
                 </p>
               </div>
               <span className="text-xs font-mono font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200 flex items-center gap-1">
@@ -1266,15 +1379,15 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
             <div>
               <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                 <KeyRound className="w-5 h-5 text-amber-600" />
-                <span>各角色独立访问密码与权限管理 (Requirement 5)</span>
+                <span>账号密码管理与权限 (管理员专用)</span>
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                系统严格实施岗位独立密码鉴权：每一个用户都需要独立的密码才可以进入对应权限页面。未授权或无密码时仅具备查看权限（Viewer）。
+                管理员可为各岗位账号设置新密码。新密码需再次确认后才写入本地数据库，修改后页面刷新仍然有效。
               </p>
             </div>
             {!canEditAdmin && (
               <span className="text-xs font-medium px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-lg flex items-center gap-1">
-                <Lock className="w-3.5 h-3.5" /> 仅管理员可重置/修改密码
+                <Lock className="w-3.5 h-3.5" /> 仅管理员可修改密码
               </span>
             )}
           </div>
@@ -1325,28 +1438,59 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Password Input & Edit (Strictly masked, no plaintext reveal) */}
+                  {/* Password Change Form */}
                   <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
                     <div className="flex items-center justify-between text-xs">
                       <label className="font-bold text-slate-700 flex items-center gap-1.5">
                         <KeyRound className="w-3.5 h-3.5 text-amber-600" />
-                        <span>岗位独立访问口令 (已安全掩码)</span>
+                        <span>修改岗位访问密码</span>
                       </label>
                       <span className="text-[10px] text-slate-400">
-                        {canEditAdmin ? '管理员可输入新密码覆盖' : '安全隔离已保护'}
+                        {canEditAdmin ? '至少 8 个字符' : '安全隔离已保护'}
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <input
                         type="password"
                         disabled={!canEditAdmin}
-                        value={account.passwordHash}
-                        onChange={(e) => handleUpdateUserPassword(account.role, e.target.value)}
+                        value={passwordDrafts[account.role]?.next || ''}
+                        onChange={(e) => setPasswordDrafts((prev) => ({
+                          ...prev,
+                          [account.role]: { next: e.target.value, confirm: prev[account.role]?.confirm || '' }
+                        }))}
                         className="flex-1 text-xs font-mono font-bold border border-slate-200 rounded-lg px-3 py-1.5 bg-white text-slate-900 focus:outline-hidden focus:border-amber-500 disabled:bg-slate-100 disabled:text-slate-500 tracking-wider"
-                        placeholder="••••••••"
+                        placeholder="输入新密码"
+                        aria-label={`${roleDef.name}新密码`}
                       />
-                      {canEditAdmin && (
+                      <input
+                        type="password"
+                        disabled={!canEditAdmin}
+                        value={passwordDrafts[account.role]?.confirm || ''}
+                        onChange={(e) => setPasswordDrafts((prev) => ({
+                          ...prev,
+                          [account.role]: { next: prev[account.role]?.next || '', confirm: e.target.value }
+                        }))}
+                        className="flex-1 text-xs font-mono font-bold border border-slate-200 rounded-lg px-3 py-1.5 bg-white text-slate-900 focus:outline-hidden focus:border-amber-500 disabled:bg-slate-100 disabled:text-slate-500 tracking-wider"
+                        placeholder="再次确认新密码"
+                        aria-label={`${roleDef.name}确认新密码`}
+                      />
+                    </div>
+                    {canEditAdmin && (
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <button
+                          onClick={() => setPasswordDrafts((prev) => ({ ...prev, [account.role]: { next: '', confirm: '' } }))}
+                          className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-600 whitespace-nowrap shadow-2xs"
+                        >
+                          清空
+                        </button>
+                        <button
+                          onClick={() => handleSaveUserPassword(account.role)}
+                          className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-semibold whitespace-nowrap shadow-2xs flex items-center gap-1"
+                        >
+                          <Save className="w-3 h-3" />
+                          保存新密码
+                        </button>
                         <button
                           onClick={() => {
                             const defaultPwd =
@@ -1357,16 +1501,20 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                                 : account.role === 'SUPERVISOR'
                                 ? 'lead123'
                                 : 'admin123';
-                            handleUpdateUserPassword(account.role, defaultPwd);
+                            const updated = localUserAccounts.map(acc => acc.role === account.role ? { ...acc, passwordHash: defaultPwd } : acc);
+                            setLocalUserAccounts(updated);
+                            onUpdateUserAccounts?.(updated);
+                            setPasswordDrafts((prev) => ({ ...prev, [account.role]: { next: '', confirm: '' } }));
+                            triggerFeedback(`角色【${ROLE_DEFINITIONS[account.role]?.name || account.role}】已恢复初始密码`, 'info');
                           }}
                           className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-600 whitespace-nowrap shadow-2xs"
-                          title="重置为初始密码"
+                          title="恢复为初始密码"
                         >
-                          重置初始密码
+                          恢复初始密码
                         </button>
-                      )}
+                      </div>
+                    )}
                     </div>
-                  </div>
 
                   {/* Permissions & Allowed Tabs */}
                   <div className="space-y-1.5 text-xs">
@@ -1533,7 +1681,7 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <input
-                  placeholder="反应釜编号 (如 R-6000-03)"
+                  placeholder="反应釜编号 (如 R-6000-01)"
                   value={newReactorDraft.reactor_id || ''}
                   onChange={(e) => setNewReactorDraft({ ...newReactorDraft, reactor_id: e.target.value })}
                   className="text-xs border border-blue-200 rounded-lg p-2 bg-white"
@@ -1571,6 +1719,19 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                   onChange={(e) => setNewReactorDraft({ ...newReactorDraft, location: e.target.value })}
                   className="text-xs border border-blue-200 rounded-lg p-2 bg-white"
                 />
+                {/* 所属车间必须显式指定：设备表是排产口径的权威来源，
+                    缺省归到 WS-01 会让新设备落错车间 */}
+                <select
+                  value={newReactorDraft.workshop_id || localWorkshops[0]?.id || 'WS-01'}
+                  onChange={(e) => setNewReactorDraft({ ...newReactorDraft, workshop_id: e.target.value })}
+                  className="text-xs border border-blue-200 rounded-lg p-2 bg-white"
+                >
+                  {localWorkshops.map((ws) => (
+                    <option key={ws.id} value={ws.id}>
+                      {ws.id} · {ws.name}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button
@@ -1596,6 +1757,7 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                   <th className="py-2.5 px-3">运行状态</th>
                   <th className="py-2.5 px-3">专釜专线隔离</th>
                   <th className="py-2.5 px-3">物理位置</th>
+                  <th className="py-2.5 px-3 text-right">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -1722,6 +1884,20 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                     </td>
                     <td className="py-2.5 px-3 text-slate-500">
                       {r.location}
+                    </td>
+                    <td className="py-2.5 px-3 text-right">
+                      {canEditAdmin ? (
+                        <button
+                          onClick={() => handleDeleteReactor(r)}
+                          title="删除该设备（存在占用或白名单引用时会被拒绝）"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-red-200 text-red-600 text-[11px] font-semibold hover:bg-red-50 transition-colors"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>删除</span>
+                        </button>
+                      ) : (
+                        <span className="text-slate-300 text-[11px]">—</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -2324,8 +2500,33 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
             </div>
           </div>
 
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-bold text-indigo-950">每周工作日设置</div>
+                <div className="text-[11px] text-indigo-700 mt-0.5">生产主管关闭周六或周日后，排产引擎会自动跳过对应日期并顺延到下一个工作时段。</div>
+              </div>
+              <div className="flex items-center gap-4 text-xs font-semibold text-slate-700">
+                {[{ day: 6, label: '周六' }, { day: 0, label: '周日' }].map(({ day, label }) => (
+                  <label key={day} className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isWorkingDay(day)}
+                      disabled={!canEditSupervisor}
+                      onChange={(event) => updateWorkingDay(day, event.target.checked)}
+                      className="accent-indigo-600"
+                    />
+                    {label}上班
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-            {localShifts.map((shift, idx) => (
+            {localShifts.map((shift, idx) => {
+              const shiftBreaks = getShiftBreakDefinitions(shift);
+              return (
               <div
                 key={shift.id}
                 className="p-5 rounded-xl border border-slate-200 bg-slate-50/60 space-y-4 hover:border-emerald-300 transition-colors"
@@ -2383,51 +2584,59 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-600 font-medium">每班休息时间：</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min="0"
-                        max="180"
-                        step="5"
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-600 font-medium">休息时段：</span>
+                      <button
+                        type="button"
                         disabled={!canEditPlanner && !canEditSupervisor}
-                        value={shift.breakMinutes}
-                        onChange={(e) => {
-                          const val = Number(e.target.value);
-                          setLocalShifts((prev) =>
-                            prev.map((item, i) => (i === idx ? { ...item, breakMinutes: val } : item))
-                          );
-                        }}
-                        className="w-16 border border-slate-300 rounded px-1.5 py-0.5 text-xs font-mono font-bold text-right bg-white"
-                      />
-                      <span className="text-slate-600">分钟</span>
+                        onClick={() => updateShiftBreaks(idx, [...shiftBreaks, { id: `${shift.id}-BREAK-${shiftBreaks.length + 1}`, startTime: shift.code === 'NIGHT' ? '04:00' : '16:00', durationMinutes: 30, name: '新增休息' }])}
+                        className="px-2 py-1 rounded border border-emerald-200 bg-white text-[11px] font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                      >
+                        + 添加时段
+                      </button>
                     </div>
-                  </div>
-
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-600 font-medium">休息开始时间：</span>
-                    <div className="flex items-center gap-1 font-mono">
-                      <input
-                        type="time"
-                        disabled={!canEditPlanner && !canEditSupervisor}
-                        value={shift.breakStartTime || ''}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setLocalShifts((prev) =>
-                            prev.map((item, i) => (i === idx ? { ...item, breakStartTime: val } : item))
-                          );
-                        }}
-                        className="border border-slate-300 rounded px-1.5 py-0.5 text-xs bg-white"
-                      />
-                      <span className="text-[10px] text-slate-400 font-sans">(留空默认居中)</span>
-                    </div>
+                    {shiftBreaks.length === 0 && <div className="text-[11px] text-slate-400">暂无休息时段</div>}
+                    {shiftBreaks.map((breakItem, breakIdx) => (
+                      <div key={breakItem.id || breakIdx} className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-1.5">
+                        <span className="text-[10px] text-slate-400">#{breakIdx + 1}</span>
+                        <input
+                          type="time"
+                          disabled={!canEditPlanner && !canEditSupervisor}
+                          value={breakItem.startTime}
+                          onChange={(e) => updateShiftBreaks(idx, shiftBreaks.map((item, i) => i === breakIdx ? { ...item, startTime: e.target.value } : item))}
+                          className="border border-slate-300 rounded px-1.5 py-0.5 text-xs bg-white"
+                          aria-label={`${shift.name}第${breakIdx + 1}个休息开始时间`}
+                        />
+                        <input
+                          type="number"
+                          min="5"
+                          max="180"
+                          step="5"
+                          disabled={!canEditPlanner && !canEditSupervisor}
+                          value={breakItem.durationMinutes}
+                          onChange={(e) => updateShiftBreaks(idx, shiftBreaks.map((item, i) => i === breakIdx ? { ...item, durationMinutes: Number(e.target.value) } : item))}
+                          className="w-16 border border-slate-300 rounded px-1.5 py-0.5 text-xs font-mono font-bold text-right bg-white"
+                          aria-label={`${shift.name}第${breakIdx + 1}个休息时长`}
+                        />
+                        <button
+                          type="button"
+                          disabled={!canEditPlanner && !canEditSupervisor}
+                          onClick={() => updateShiftBreaks(idx, shiftBreaks.filter((_, i) => i !== breakIdx))}
+                          className="p-1 rounded text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                          title="删除此休息时段"
+                        >
+                           <Trash2 className="w-3.5 h-3.5" />
+                         </button>
+                       </div>
+                     ))}
+                    <div className="text-[10px] text-slate-400">每个时段可独立设置开始时间和分钟数</div>
                   </div>
 
                   <div className="flex items-center justify-between text-xs bg-slate-100/80 px-2.5 py-1.5 rounded-lg border border-slate-200">
                     <span className="text-slate-700 font-semibold">排产开工时长核算：</span>
                     <span className="text-emerald-700 font-mono font-bold">
-                      {getShiftDurationHours(shift)}H (净作业 {Math.max(0, (getShiftDurationHours(shift) * 60 - (shift.breakMinutes || 0)) / 60).toFixed(1)}H)
+                      {getShiftDurationHours(shift)}H (净作业 {Math.max(0, (getShiftDurationHours(shift) * 60 - shiftBreaks.reduce((sum, item) => sum + item.durationMinutes, 0)) / 60).toFixed(1)}H)
                     </span>
                   </div>
 
@@ -2464,9 +2673,10 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                   </div>
                 </div>
 
-                <p className="text-[11px] text-slate-500 border-t border-slate-200/60 pt-2">{shift.notes}</p>
-              </div>
-            ))}
+                 <p className="text-[11px] text-slate-500 border-t border-slate-200/60 pt-2">{shift.notes}</p>
+               </div>
+              );
+            })}
           </div>
 
           {(canEditSupervisor || canEditPlanner) && (
@@ -2476,7 +2686,7 @@ export const AdminConfigView: React.FC<AdminConfigViewProps> = ({
                 className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 shadow-xs transition-colors"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>保存排班班次与每班休息时间并自动排产</span>
+                <span>保存工作日、排班班次与休息时间并自动排产</span>
               </button>
             </div>
           )}

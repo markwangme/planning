@@ -11,6 +11,7 @@ import {
   PROCESS_NODES,
   SystemConfig,
   ShiftDef,
+  ShiftBreak,
   StaffingConfig,
   UserRole,
   UserRoleInfo,
@@ -30,6 +31,12 @@ import {
   WhatIfScenario,
   WhatIfComparisonMatrix
 } from '../types/aps';
+import {
+  SEED_REACTOR_MASTER,
+  buildDeviceMaster,
+  planBatchQuantities,
+  type DeviceMaster,
+} from '../shared/apsMasterData';
 
 /**
  * 0. 系统全局默认配置 (管理员可修改系统名称、副标题等)
@@ -236,9 +243,11 @@ export const DEFAULT_SHIFTS: ShiftDef[] = [
     breakMinutes: 60,
     breakStartTime: '12:00',
     breakName: '午餐及工间休整',
+    breaks: [{ id: 'DAY-BREAK-1', startTime: '12:00', durationMinutes: 60, name: '午餐及工间休整' }],
     headcount: 10,
     supervisorName: '李主管 (生产一部)',
     isActive: true,
+    workingDays: [0, 1, 2, 3, 4, 5, 6],
     notes: '08:00-20:00 白班 (两班制标准)，负责主线投料、溶剂密闭管道灌注及日间生产'
   },
   {
@@ -250,9 +259,11 @@ export const DEFAULT_SHIFTS: ShiftDef[] = [
     breakMinutes: 60,
     breakStartTime: '00:00',
     breakName: '夜餐及巡检休息',
+    breaks: [{ id: 'NIGHT-BREAK-1', startTime: '00:00', durationMinutes: 60, name: '夜餐及巡检休息' }],
     headcount: 10,
     supervisorName: '张主管 (夜间值守)',
     isActive: true,
+    workingDays: [0, 1, 2, 3, 4, 5, 6],
     notes: '20:00-08:00 夜班 (两班制标准)，混合搅拌跨班连续运行、化验室放行与灌装充氮'
   }
 ];
@@ -270,22 +281,31 @@ export const DEFAULT_STAFFING_CONFIG: StaffingConfig = {
 };
 
 /**
- * 1. 反应釜初始标准配置 (覆盖一期与二期车间)
- * 一期车间 (WS-01: 甲类洁净厂房):
- * - R-1300-01 (1.3 t 釜, 1,300 kg)
- * - R-6000-01 (6 t 釜 #1, 6,000 kg)
- * 二期车间 (WS-02: 乙类防爆厂房):
- * - R-6000-02 (6 t 釜 #2, 6,000 kg 专线釜)
- * - R-6000-03 (6 t 釜 #3, 6,000 kg 储能与高压配制釜)
+ * 1. 反应釜初始标准配置
+ * 设备身份、所属车间、额定容量与投料上下限一律取自 src/shared/apsMasterData.ts 的
+ * REACTOR_MASTER（与后端 server.ts 共用同一份主数据），此处只补充界面演示所需的动态状态。
+ * 口径依据 NOVOLYTE V2.0 设计文档 §1：排产资源固定为三台釜（1.3 t 釜 1 台 + 6 t 釜 2 台）。
  */
-export const INITIAL_REACTORS: Reactor[] = [
-  {
-    reactor_id: 'R-1300-01',
-    reactor_name: '1.3 t 反应釜 (小试/特种线)',
-    workshop_id: 'WS-01',
-    rated_kg: 1300,
-    min_kg: 300,
-    max_kg: 1300,
+type ReactorIdentityKeys =
+  | 'reactor_id'
+  | 'reactor_name'
+  | 'workshop_id'
+  | 'rated_kg'
+  | 'min_kg'
+  | 'max_kg';
+
+const FALLBACK_REACTOR_UI: Omit<Reactor, ReactorIdentityKeys> = {
+  status: 'IDLE',
+  clean_state: 'UNKNOWN',
+  last_model_code: 'UNKNOWN',
+  available_at: '2026-09-14 08:00',
+  location: '未登记',
+  exclusive_mode: false,
+  notes: '该设备尚未维护界面演示参数，请补齐主数据后再启用'
+};
+
+const REACTOR_UI_DEFAULTS: Record<string, Omit<Reactor, ReactorIdentityKeys>> = {
+  'R-1300-01': {
     volume_m3: 1.5,
     status: 'RUNNING',
     clean_state: 'CLEAN',
@@ -297,13 +317,7 @@ export const INITIAL_REACTORS: Reactor[] = [
     exclusive_mode: false,
     notes: '适用于小批量试产或超高净度特种电解液'
   },
-  {
-    reactor_id: 'R-6000-01',
-    reactor_name: '6 t 反应釜 #1 (动力主线 1号)',
-    workshop_id: 'WS-01',
-    rated_kg: 6000,
-    min_kg: 2000,
-    max_kg: 6000,
+  'R-6000-01': {
     volume_m3: 7.2,
     status: 'RUNNING',
     clean_state: 'CLEAN',
@@ -315,13 +329,7 @@ export const INITIAL_REACTORS: Reactor[] = [
     exclusive_mode: false,
     notes: '主力动力电解液量产釜，双层夹套强制冷水循环'
   },
-  {
-    reactor_id: 'R-6000-02',
-    reactor_name: '6 t 反应釜 #2 (动力主线 2号 / 专属釜)',
-    workshop_id: 'WS-02',
-    rated_kg: 6000,
-    min_kg: 2000,
-    max_kg: 6000,
+  'R-6000-02': {
     volume_m3: 7.2,
     status: 'RUNNING',
     clean_state: 'CLEAN',
@@ -332,26 +340,25 @@ export const INITIAL_REACTORS: Reactor[] = [
     agitation_rpm: 175,
     exclusive_mode: false,
     notes: '独立维护状态与上一型号，支持特殊高镍/强腐蚀体系专用'
-  },
-  {
-    reactor_id: 'R-6000-03',
-    reactor_name: '6 t 反应釜 #3 (储能与高压配制釜)',
-    workshop_id: 'WS-02',
-    rated_kg: 6000,
-    min_kg: 2000,
-    max_kg: 6000,
-    volume_m3: 7.2,
-    status: 'IDLE',
-    clean_state: 'CLEAN',
-    last_model_code: 'SIM-MODEL-B',
-    available_at: '2026-09-14 08:00',
-    location: '二期乙类防爆厂房 D-201',
-    temperature: 19.2,
-    agitation_rpm: 160,
-    exclusive_mode: false,
-    notes: '二期扩产核心配制釜，配置大功率冷却与精密充氮系统'
   }
-];
+};
+
+/**
+ * 初始设备表 —— 仅用于首次建库的种子。
+ * 运行时权威是后台维护的设备表（管理界面可新增/修改/删除），
+ * 因此这里不构成对后台数据的任何覆盖。
+ */
+export const INITIAL_REACTORS: Reactor[] = SEED_REACTOR_MASTER.map((master) => ({
+  reactor_id: master.reactor_id,
+  reactor_name: master.reactor_name ?? master.reactor_id,
+  workshop_id: master.workshop_id,
+  rated_kg: master.rated_kg ?? master.max_kg ?? 0,
+  // null 表示工艺未确认最小投料量；此处以 0 表达「不做下限校验」
+  min_kg: master.min_kg ?? 0,
+  max_kg: master.max_kg ?? master.rated_kg ?? 0,
+  ...(REACTOR_UI_DEFAULTS[master.reactor_id] ?? FALLBACK_REACTOR_UI)
+}));
+
 
 /**
  * 2. 产品型号与白名单定义
@@ -363,7 +370,7 @@ export const INITIAL_PRODUCT_MODELS: ProductModelDef[] = [
     special_cleaning: false,
     special_scope: 'EITHER',
     approval_status: 'APPROVED',
-    allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02', 'R-6000-03'],
+    allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02'],
     min_order_kg: 500,
     batch_standard_hours: 10.5,
     recipe_notes: '常规三元EC/DMC/EMC基液，严格控制冰水回水温度<=20℃',
@@ -381,7 +388,7 @@ export const INITIAL_PRODUCT_MODELS: ProductModelDef[] = [
     special_cleaning: false,
     special_scope: 'EITHER',
     approval_status: 'APPROVED',
-    allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02', 'R-6000-03'],
+    allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02'],
     min_order_kg: 500,
     batch_standard_hours: 10.5,
     recipe_notes: '高纯LiPF6+VC成膜添加剂，混合搅拌转速160rpm',
@@ -417,7 +424,7 @@ export const INITIAL_PRODUCT_MODELS: ProductModelDef[] = [
     special_cleaning: false,
     special_scope: 'EITHER',
     approval_status: 'APPROVED',
-    allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02', 'R-6000-03'],
+    allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02'],
     min_order_kg: 500,
     batch_standard_hours: 10.0,
     recipe_notes: '4.45V高电压耐氧化体系，水分控制<=10ppm',
@@ -491,7 +498,9 @@ export const INITIAL_WASH_RULES: WashMatrixRule[] = [
  */
 export function splitOrderBatches(
   order: ProductionOrder,
-  targetReactor: Reactor
+  targetReactor: Reactor,
+  allReactors?: Reactor[],
+  restrictions: ReactorRestriction[] = []
 ): {
   batchIndex: number;
   totalBatches: number;
@@ -500,82 +509,54 @@ export function splitOrderBatches(
   isBelowMinWarning?: boolean;
   unassignedRemainderKg?: number;
 }[] {
-  const Q = Math.round(order.qty_kg);
-  const C = targetReactor.max_kg;
-  const minKg = targetReactor.min_kg;
+  // 批量拆分算法与设备口径统一收敛到 src/shared/apsMasterData.ts，
+  // 不再在此重复实现，也不硬编码 1300 / 300 这类上下限。
+  // 大/小容量釜的划分由「后台维护的设备表」推导，不认设备编号。
+  const master: DeviceMaster = buildDeviceMaster(
+    allReactors && allReactors.length > 0 ? allReactors : SEED_REACTOR_MASTER
+  );
+  const smallReactorId = master.smallReactor?.reactor_id ?? '';
+  const isSmallTarget = targetReactor.reactor_id === smallReactorId;
+  const smallIsAllowed = isSmallTarget || Boolean(
+    smallReactorId && validateReactorRestriction(order.product_model, smallReactorId, restrictions).valid
+  );
 
-  // 1. 如果订单总量小于等于上限
-  if (Q <= C) {
-    const isBelow = Q < minKg;
-    return [
-      {
-        batchIndex: 1,
-        totalBatches: 1,
-        batchQtyKg: Q,
-        assignedReactorId: targetReactor.reactor_id,
-        isBelowMinWarning: isBelow
-      }
-    ];
-  }
+  const { batches: planned } = planBatchQuantities(order.qty_kg, {
+    master,
+    bulkMaxKg: targetReactor.max_kg,
+    bulkMinKg: targetReactor.min_kg,
+    // 目标釜本身就是小容量釜时，不再二次回退到小釜
+    smallMaxKg: smallIsAllowed ? undefined : null
+  });
 
-  // 2. 向下取整满批数
-  const fullBatchCount = Math.floor(Q / C);
-  const remainderKg = Q - fullBatchCount * C;
+  const totalBatches = planned.length;
 
-  const batches: {
-    batchIndex: number;
-    totalBatches: number;
-    batchQtyKg: number;
-    assignedReactorId: string;
-    isBelowMinWarning?: boolean;
-    unassignedRemainderKg?: number;
-  }[] = [];
+  return planned.map((batch, index) => {
+    const assignedReactorId =
+      batch.vessel_class === 'SMALL' && smallIsAllowed && smallReactorId ? smallReactorId : targetReactor.reactor_id;
 
-  for (let i = 1; i <= fullBatchCount; i++) {
-    batches.push({
-      batchIndex: i,
-      totalBatches: remainderKg > 0 ? fullBatchCount + 1 : fullBatchCount,
-      batchQtyKg: C,
-      assignedReactorId: targetReactor.reactor_id
-    });
-  }
+    const entry: {
+      batchIndex: number;
+      totalBatches: number;
+      batchQtyKg: number;
+      assignedReactorId: string;
+      isBelowMinWarning?: boolean;
+      unassignedRemainderKg?: number;
+    } = {
+      batchIndex: index + 1,
+      totalBatches,
+      batchQtyKg: batch.qty_kg,
+      assignedReactorId
+    };
 
-  // 3. 尾批检查
-  if (remainderKg > 0) {
-    if (remainderKg >= minKg) {
-      // 尾量满足下限 (如 10.0t 拆为 6.0t + 4.0t)
-      batches.push({
-        batchIndex: fullBatchCount + 1,
-        totalBatches: fullBatchCount + 1,
-        batchQtyKg: remainderKg,
-        assignedReactorId: targetReactor.reactor_id
-      });
-    } else {
-      // 尾量低于该釜下限 (如 12.2t 产生 0.2t 尾量低于 2000kg)
-      // 若允许跨釜组合或 1.3t 釜可用，尝试重分配；否则列为待处理提示
-      if (remainderKg <= 1300 && remainderKg >= 300) {
-        // 分配给 1.3t 釜 R-1300-01
-        batches.push({
-          batchIndex: fullBatchCount + 1,
-          totalBatches: fullBatchCount + 1,
-          batchQtyKg: remainderKg,
-          assignedReactorId: 'R-1300-01'
-        });
-      } else {
-        // 低于所有下限 (如 200kg)，列为待处理未排量，绝不丢弃尾量
-        batches.push({
-          batchIndex: fullBatchCount + 1,
-          totalBatches: fullBatchCount + 1,
-          batchQtyKg: remainderKg,
-          assignedReactorId: targetReactor.reactor_id,
-          isBelowMinWarning: true,
-          unassignedRemainderKg: remainderKg
-        });
-      }
+    // 尾批经合法重分配后仍低于下限时，保留为待处理余量，绝不丢弃
+    if (batch.below_min) {
+      entry.isBelowMinWarning = true;
+      entry.unassignedRemainderKg = batch.qty_kg;
     }
-  }
 
-  return batches;
+    return entry;
+  });
 }
 
 /**
@@ -737,7 +718,7 @@ export function getDailyGrossWorkingHours(shifts: ShiftDef[]): number {
 export function getDailyBreakMinutes(shifts: ShiftDef[]): number {
   return shifts
     .filter((s) => s.isActive)
-    .reduce((sum, s) => sum + (s.breakMinutes || 0), 0);
+    .reduce((sum, s) => sum + getShiftBreakDefinitions(s).reduce((total, b) => total + b.durationMinutes, 0), 0);
 }
 
 /**
@@ -764,11 +745,33 @@ export function calculateReactorDailyCapacityKg(
   return Math.round(reactor.max_kg * batchesPerDay);
 }
 
-/**
- * 获取指定班次在一天内的产线休息时间窗 [startMin, endMin] (0..1439)
- */
-export function getShiftBreakWindow(shift: ShiftDef): { startMin: number; endMin: number; breakMinutes: number } | null {
-  if (!shift || !shift.breakMinutes || shift.breakMinutes <= 0) return null;
+function parseClockMinutes(value: string | undefined, fallback: number): number {
+  const [hours, minutes] = (value || '').split(':').map(Number);
+  return Number.isFinite(hours) && Number.isFinite(minutes) ? hours * 60 + minutes : fallback;
+}
+
+/** Return the configured breaks, with a compatibility fallback for legacy single-break data. */
+export function getShiftBreakDefinitions(shift: ShiftDef): ShiftBreak[] {
+  if (Array.isArray(shift?.breaks)) {
+    return shift.breaks
+      .map((breakItem, index) => ({
+        id: breakItem.id || `${shift.id}-BREAK-${index + 1}`,
+        startTime: breakItem.startTime,
+        durationMinutes: Number(breakItem.durationMinutes),
+        name: breakItem.name || shift.breakName || '产线休息'
+      }))
+      .filter((breakItem) => /^\d{2}:\d{2}$/.test(breakItem.startTime) && Number.isFinite(breakItem.durationMinutes) && breakItem.durationMinutes > 0);
+  }
+  if (!shift || !Number.isFinite(Number(shift.breakMinutes)) || Number(shift.breakMinutes) <= 0) return [];
+  const shiftDuration = getShiftDurationHours(shift) * 60;
+  const fallbackStart = shift.code === 'DAY' ? 720 : shift.code === 'MIDDLE' ? 1080 : shift.code === 'NIGHT' ? 210 : 0;
+  const startMin = parseClockMinutes(shift.breakStartTime, Math.max(0, fallbackStart));
+  return [{ id: `${shift.id}-BREAK-1`, startTime: `${String(Math.floor(startMin / 60) % 24).padStart(2, '0')}:${String(startMin % 60).padStart(2, '0')}`, durationMinutes: Number(shift.breakMinutes), name: shift.breakName || '产线休息' }];
+}
+
+/** 获取指定班次在一天内的全部产线休息时间窗。 */
+export function getShiftBreakWindows(shift: ShiftDef): { startMin: number; endMin: number; breakMinutes: number; breakName: string }[] {
+  if (!shift) return [];
 
   const [sH, sM] = (shift.startTime || '08:00').split(':').map(Number);
   let [eH, eM] = (shift.endTime || '16:00').split(':').map(Number);
@@ -777,28 +780,17 @@ export function getShiftBreakWindow(shift: ShiftDef): { startMin: number; endMin
   if ((shift.endTime === '24:00' || shift.endTime === '00:00') && eMin === 0) {
     eMin = 1440;
   }
-  let shiftDuration = eMin - sMin;
-  if (shiftDuration <= 0) shiftDuration += 1440;
+  const shiftDuration = eMin - sMin <= 0 ? eMin - sMin + 1440 : eMin - sMin;
+  return getShiftBreakDefinitions(shift).map((breakItem) => {
+    const startMin = parseClockMinutes(breakItem.startTime, sMin + Math.floor((shiftDuration - breakItem.durationMinutes) / 2)) % 1440;
+    return { startMin, endMin: startMin + breakItem.durationMinutes, breakMinutes: breakItem.durationMinutes, breakName: breakItem.name || shift.breakName || '产线休息' };
+  });
+}
 
-  let bStartMin: number;
-  if (shift.breakStartTime) {
-    const [bH, bM] = shift.breakStartTime.split(':').map(Number);
-    bStartMin = (bH || 0) * 60 + (bM || 0);
-  } else {
-    // 默认根据班次类型或中点设置合理休息时间
-    if (shift.code === 'DAY') {
-      bStartMin = 12 * 60; // 12:00
-    } else if (shift.code === 'MIDDLE') {
-      bStartMin = 18 * 60; // 18:00
-    } else if (shift.code === 'NIGHT') {
-      bStartMin = 3 * 60 + 30; // 03:30
-    } else {
-      bStartMin = (sMin + Math.floor((shiftDuration - shift.breakMinutes) / 2)) % 1440;
-    }
-  }
-
-  let bEndMin = bStartMin + shift.breakMinutes;
-  return { startMin: bStartMin, endMin: bEndMin, breakMinutes: shift.breakMinutes };
+/** Legacy singular accessor retained for existing consumers. */
+export function getShiftBreakWindow(shift: ShiftDef): { startMin: number; endMin: number; breakMinutes: number } | null {
+  const first = getShiftBreakWindows(shift)[0];
+  return first ? { startMin: first.startMin, endMin: first.endMin, breakMinutes: first.breakMinutes } : null;
 }
 
 /**
@@ -811,8 +803,10 @@ export function isMinuteInShiftBreak(
   const activeShifts = shifts.filter((s) => s.isActive);
   const d = new Date(dateMinutes * 1000 * 60);
   const dayMinute = d.getHours() * 60 + d.getMinutes(); // 0 .. 1439
+  const dayOfWeek = d.getDay();
 
   for (const shift of activeShifts) {
+    if (Array.isArray(shift.workingDays) && !shift.workingDays.includes(dayOfWeek)) continue;
     // 校验该时刻是否在该班次所属时间窗内
     const [startH, startM] = shift.startTime.split(':').map(Number);
     let [endH, endM] = shift.endTime.split(':').map(Number);
@@ -828,23 +822,15 @@ export function isMinuteInShiftBreak(
 
     if (!inShiftSpan) continue;
 
-    const breakWin = getShiftBreakWindow(shift);
-    if (!breakWin) continue;
-
-    const { startMin: bStart, endMin: bEnd } = breakWin;
-    let inBreak = false;
-    if (bEnd <= 1440) {
-      inBreak = dayMinute >= bStart && dayMinute < bEnd;
-    } else {
-      inBreak = dayMinute >= bStart || dayMinute < (bEnd % 1440);
-    }
-
-    if (inBreak) {
+    const breakWin = getShiftBreakWindows(shift).find(({ startMin: bStart, endMin: bEnd }) =>
+      bEnd <= 1440 ? dayMinute >= bStart && dayMinute < bEnd : dayMinute >= bStart || dayMinute < (bEnd % 1440)
+    );
+    if (breakWin) {
       return {
         isBreak: true,
         shiftName: shift.name,
-        breakName: shift.breakName || '产线休息',
-        breakMinutes: shift.breakMinutes
+        breakName: breakWin.breakName,
+        breakMinutes: breakWin.breakMinutes
       };
     }
   }
@@ -862,9 +848,11 @@ export function isMinuteInWorkingTime(dateMinutes: number, shifts: ShiftDef[]): 
 
   const d = new Date(dateMinutes * 1000 * 60);
   const dayMinute = d.getHours() * 60 + d.getMinutes(); // 0 .. 1439
+  const dayOfWeek = d.getDay();
 
   // 1. 查找当前时刻所在的已激活班次
   const matchedShift = activeShifts.find((shift) => {
+    if (Array.isArray(shift.workingDays) && !shift.workingDays.includes(dayOfWeek)) return false;
     const [startH, startM] = shift.startTime.split(':').map(Number);
     let [endH, endM] = shift.endTime.split(':').map(Number);
     let sMin = (startH || 0) * 60 + (startM || 0);
@@ -885,19 +873,10 @@ export function isMinuteInWorkingTime(dateMinutes: number, shifts: ShiftDef[]): 
   }
 
   // 2. 检查是否落在产线休息时间内 (去除休息时间)
-  const breakWin = getShiftBreakWindow(matchedShift);
-  if (breakWin) {
-    const { startMin: bStart, endMin: bEnd } = breakWin;
-    let inBreak = false;
-    if (bEnd <= 1440) {
-      inBreak = dayMinute >= bStart && dayMinute < bEnd;
-    } else {
-      inBreak = dayMinute >= bStart || dayMinute < (bEnd % 1440);
-    }
-    if (inBreak) {
-      return false; // 产线休息时段，去除！
-    }
-  }
+  const inBreak = getShiftBreakWindows(matchedShift).some(({ startMin: bStart, endMin: bEnd }) =>
+    bEnd <= 1440 ? dayMinute >= bStart && dayMinute < bEnd : dayMinute >= bStart || dayMinute < (bEnd % 1440)
+  );
+  if (inBreak) return false; // 产线休息时段，去除！
 
   return true;
 }
@@ -983,8 +962,9 @@ export function getBatchWorkingSegments(
   // 检查是否有任何非工作时段或休息时间
   const hasBreaks = shifts.some((s) => s.isActive && (s.breakMinutes || 0) > 0);
   const hasInactiveShifts = shifts.some((s) => !s.isActive);
+  const hasCalendarGaps = shifts.some((s) => Array.isArray(s.workingDays) && s.workingDays.length < 7);
 
-  if (!hasBreaks && !hasInactiveShifts) {
+  if (!hasBreaks && !hasInactiveShifts && !hasCalendarGaps) {
     return [
       {
         startMin,
@@ -1094,7 +1074,7 @@ export const INITIAL_ORDERS_V2: ProductionOrder[] = [
     allow_split: true,
     allow_parallel: false,
     split_batches: [
-      { batch_no: 'SIM-B003', qty_kg: 6000, reactor_id: 'R-6000-03' },
+      { batch_no: 'SIM-B003', qty_kg: 6000, reactor_id: 'R-6000-02' },
       { batch_no: 'SIM-B004', qty_kg: 1300, reactor_id: 'R-1300-01' }
     ],
     completed_good_kg: 0,
@@ -1157,8 +1137,7 @@ export const INITIAL_ORDERS_V2: ProductionOrder[] = [
  *   - R-1300-01: A 1.3t (已开工) -> 洗 2h -> C 1.0t
  *   - R-6000-01: A 6.0t (已开工) -> A 4.0t (同型号免洗 0h)
  * - 二期车间:
- *   - R-6000-02: 特殊切换 3h -> S 6.0t (专属高镍釜)
- *   - R-6000-03: 洗 2h -> B 6.0t (储能配制釜)
+ *   - R-6000-02: 特殊切换 3h -> S 6.0t (专属高镍釜) -> B 6.0t (储能配制釜)
  */
 export const INITIAL_BATCH_TASKS_V2: BatchTask[] = [
   // 一期车间 (WS-01) - 釜 1 (R-1300-01)
@@ -1337,7 +1316,7 @@ export const INITIAL_BATCH_TASKS_V2: BatchTask[] = [
     notes: '【二期专线隔离】指定 R-6000-02 设备，特殊切换洗釜 3.0 小时 (180分钟)'
   },
 
-  // 二期车间 (WS-02) - 釜 4 (R-6000-03 配制釜)
+  // 二期车间 (WS-02) - 釜 3 (R-6000-02 专线釜，兼储能配制)
   {
     batch_id: 'SIM-B003',
     order_no: 'SIM-SO-002',
@@ -1346,27 +1325,27 @@ export const INITIAL_BATCH_TASKS_V2: BatchTask[] = [
     product_name: '储能长寿命磷酸铁锂电解液 B',
     workshop_id: 'WS-02',
     batch_qty_kg: 6000,
-    assigned_reactor_id: 'R-6000-03',
-    plan_start_time: '2026-09-14 10:00',
-    plan_end_time: '2026-09-14 20:30',
+    assigned_reactor_id: 'R-6000-02',
+    plan_start_time: '2026-09-15 21:30',
+    plan_end_time: '2026-09-16 08:00',
     plan_duration_min: 630,
-    actual_start_time: '2026-09-14 10:00',
+    actual_start_time: '2026-09-15 21:30',
     deviation_type: 'NORMAL',
     deviation_minutes: 0,
     is_reason_submitted: true,
-    is_locked: true,
+    is_locked: false,
     is_actual: false,
     current_step: 1,
     step_status: 'PENDING',
     qc_status: 'WAITING',
     good_filled_kg: 0,
     preceding_wash_min: 120, // 普通切换 2h
-    preceding_wash_start: '2026-09-14 08:00',
-    preceding_wash_end: '2026-09-14 10:00',
+    preceding_wash_start: '2026-09-15 19:30',
+    preceding_wash_end: '2026-09-15 21:30',
     wash_rule_type: 'NORMAL_DIFF_120MIN',
     batch_index: 1,
     total_batches: 1,
-    notes: '二期储能配制釜：标准 CIP 换线洗釜 2.0 小时'
+    notes: '二期唯一 6t 釜：排在既有任务之后，标准 CIP 换线洗釜 2.0 小时'
   },
   {
     batch_id: 'SIM-B004-R3',
@@ -1374,9 +1353,9 @@ export const INITIAL_BATCH_TASKS_V2: BatchTask[] = [
     customer_name: '客户 B (比亚迪储能)',
     product_model: 'SIM-MODEL-B',
     product_name: '储能长寿命磷酸铁锂电解液 B',
-    workshop_id: 'WS-02',
-    batch_qty_kg: 6000,
-    assigned_reactor_id: 'R-6000-03',
+    workshop_id: 'WS-01',
+    batch_qty_kg: 1300,
+    assigned_reactor_id: 'R-1300-01',
     plan_start_time: '2026-09-14 21:00',
     plan_end_time: '2026-09-15 07:30',
     plan_duration_min: 630,
@@ -1490,11 +1469,11 @@ export const INITIAL_BATCH_TASKS_V2: BatchTask[] = [
     product_name: '储能长寿命磷酸铁锂电解液 B',
     workshop_id: 'WS-02',
     batch_qty_kg: 6000,
-    assigned_reactor_id: 'R-6000-03',
-    plan_start_time: '2026-09-15 09:00',
-    plan_end_time: '2026-09-15 19:30',
+    assigned_reactor_id: 'R-6000-02',
+    plan_start_time: '2026-09-16 08:30',
+    plan_end_time: '2026-09-16 19:00',
     plan_duration_min: 630,
-    actual_start_time: '2026-09-15 09:00',
+    actual_start_time: '2026-09-16 08:30',
     deviation_type: 'NORMAL',
     deviation_minutes: 0,
     is_reason_submitted: true,
@@ -1508,7 +1487,7 @@ export const INITIAL_BATCH_TASKS_V2: BatchTask[] = [
     wash_rule_type: 'SAME_MODEL_0MIN',
     batch_index: 1,
     total_batches: 1,
-    notes: '09-15 二期 6t 储能釜连续配制'
+    notes: '09-16 二期 6t 釜连续配制'
   }
 ];
 
@@ -1528,7 +1507,8 @@ export function rescheduleBatchesSequenceForReactor(
   washRules: WashMatrixRule[],
   customShifts: ShiftDef[],
   mainStepsTotalHours: number,
-  t0Minutes: number
+  t0Minutes: number,
+  productModels: ProductModelDef[] = INITIAL_PRODUCT_MODELS
 ): BatchTask[] {
   // 按批次计划开始时间排序
   const sorted = [...batchesOnReactor].sort(
@@ -1542,7 +1522,7 @@ export function rescheduleBatchesSequenceForReactor(
   const recalculated: BatchTask[] = [];
 
   for (const b of sorted) {
-    const matchedModel = INITIAL_PRODUCT_MODELS.find((m) => m.model_code === b.product_model);
+    const matchedModel = productModels.find((m) => m.model_code === b.product_model);
     const modelBatchHours = matchedModel?.batch_standard_hours || mainStepsTotalHours;
     const netBatchProdDurationMin = Math.round(modelBatchHours * 60);
 
@@ -1570,6 +1550,16 @@ export function rescheduleBatchesSequenceForReactor(
       lastModelCode = b.product_model;
       cleanState = 'CLEAN';
       recalculated.push(updatedBatch);
+      continue;
+    }
+
+    // A frozen future task is an immutable baseline. It must not be moved by
+    // an automatic recalculation; only the following unfrozen tasks may move.
+    if (b.is_locked) {
+      currentReactorAvailableMin = Math.max(currentReactorAvailableMin, parseDateToMinutes(b.plan_end_time));
+      lastModelCode = b.product_model;
+      cleanState = 'CLEAN';
+      recalculated.push(b);
       continue;
     }
 
@@ -1633,7 +1623,8 @@ export function runSmartSchedule(
   strategy: 'SETUP_MINIMIZE' | 'EDD_FIRST' | 'LOAD_BALANCE' = 'SETUP_MINIMIZE',
   customProcessNodes: ProcessNodeDef[] = PROCESS_NODES,
   customShifts: ShiftDef[] = DEFAULT_SHIFTS,
-  customStaffing: StaffingConfig = DEFAULT_STAFFING_CONFIG
+  customStaffing: StaffingConfig = DEFAULT_STAFFING_CONFIG,
+  customProductModels: ProductModelDef[] = INITIAL_PRODUCT_MODELS
 ): {
   batches: BatchTask[];
   unassignedIssues: string[];
@@ -1642,6 +1633,18 @@ export function runSmartSchedule(
   const t0Minutes = parseDateToMinutes(t0Str);
   const freezeLimitMinutes = t0Minutes + 24 * 60; // 24小时连续锁定
   const unassignedIssues: string[] = [];
+
+  // 订单数量或状态发生变化时，旧批次不能继续沿用，否则会出现订单已改为
+  // 200kg、页面仍展示原先 6000kg 批次的数据错配。
+  const currentQtyByOrder = new Map<string, number>();
+  currentBatches.forEach((batch) => {
+    currentQtyByOrder.set(batch.order_no, (currentQtyByOrder.get(batch.order_no) || 0) + (Number(batch.batch_qty_kg) || 0));
+  });
+  const staleOrderNos = new Set(
+    orders
+      .filter((order) => order.status === 'PENDING_SCHEDULE' || Math.abs((currentQtyByOrder.get(order.order_no) || 0) - order.qty_kg) > 0.001)
+      .map((order) => order.order_no),
+  );
 
   // 计算动态批次标准工时 (工序1~5标准工时求和)
   const mainStepsTotalHours = customProcessNodes
@@ -1663,7 +1666,9 @@ export function runSmartSchedule(
   > = {};
 
   reactors.forEach((reactor) => {
-    const assignedBatches = currentBatches.filter((b) => b.assigned_reactor_id === reactor.reactor_id);
+    const assignedBatches = currentBatches.filter(
+      (b) => b.assigned_reactor_id === reactor.reactor_id && !staleOrderNos.has(b.order_no),
+    );
 
     if (assignedBatches.length > 0) {
       const recalculatedBatches = rescheduleBatchesSequenceForReactor(
@@ -1673,7 +1678,8 @@ export function runSmartSchedule(
         washRules,
         customShifts,
         mainStepsTotalHours,
-        t0Minutes
+        t0Minutes,
+        customProductModels
       );
       preservedBatches.push(...recalculatedBatches);
 
@@ -1697,7 +1703,7 @@ export function runSmartSchedule(
 
   // 保留可能不在上述 reactions 列表中的离线批次
   const unassignedBatches = currentBatches.filter(
-    (b) => !reactors.some((r) => r.reactor_id === b.assigned_reactor_id)
+    (b) => !reactors.some((r) => r.reactor_id === b.assigned_reactor_id) && !staleOrderNos.has(b.order_no)
   );
   if (unassignedBatches.length > 0) {
     preservedBatches.push(...unassignedBatches);
@@ -1735,31 +1741,29 @@ export function runSmartSchedule(
       return;
     }
 
-    // 优先匹配设备：大批量(>1.3t)优先 6t 釜，小批量优先 1.3t 釜
-    let selectedReactor = allowedReactors[0];
-    if (order.qty_kg > 1300) {
-      const candidates6T = allowedReactors.filter((r) => r.max_kg >= 6000);
-      if (candidates6T.length > 0) {
-        // 若追求换产最小化，优先选上一型号相同的釜
-        const sameModel = candidates6T.find(
-          (r) => reactorTimeline[r.reactor_id].lastModelCode === order.product_model
-        );
-        selectedReactor =
-          sameModel ||
-          candidates6T.reduce((prev, curr) =>
-            reactorTimeline[curr.reactor_id].nextAvailableMinutes <
-            reactorTimeline[prev.reactor_id].nextAvailableMinutes
-              ? curr
-              : prev
-          );
-      }
-    } else {
-      const r1300 = allowedReactors.find((r) => r.reactor_id === 'R-1300-01');
-      if (r1300) selectedReactor = r1300;
-    }
+    // 设备选型：在合规候选釜中取「能一趟装下订单量的最小容量釜」（best-fit），
+    // 避免大釜干小活；装不下时退化为容量最大的釜。
+    // 容量全部读自后台维护的设备表，不再硬编码 1300 / 6000 / 'R-1300-01'。
+    const fitting = allowedReactors.filter((r) => r.max_kg >= order.qty_kg);
+    const pool = fitting.length > 0 ? fitting : allowedReactors;
+    const minCapacity = Math.min(...pool.map((r) => r.max_kg));
+    const bestFit = pool.filter((r) => r.max_kg === minCapacity);
+
+    // 同型号优先可减少换产清洗，其次选最早空闲的釜
+    const sameModel = bestFit.find(
+      (r) => reactorTimeline[r.reactor_id].lastModelCode === order.product_model
+    );
+    const selectedReactor =
+      sameModel ||
+      bestFit.reduce((prev, curr) =>
+        reactorTimeline[curr.reactor_id].nextAvailableMinutes <
+        reactorTimeline[prev.reactor_id].nextAvailableMinutes
+          ? curr
+          : prev
+      );
 
     // 执行向下拆批
-    const splits = splitOrderBatches(order, selectedReactor);
+    const splits = splitOrderBatches(order, selectedReactor, reactors, restrictions);
 
     splits.forEach((split) => {
       if (split.unassignedRemainderKg) {
@@ -1789,7 +1793,7 @@ export function runSmartSchedule(
       }
 
       // 计算批次工时 (优先考虑工艺员设定的产品标准批次时间与工序累计标准时间)
-      const matchedModel = INITIAL_PRODUCT_MODELS.find((m) => m.model_code === order.product_model);
+      const matchedModel = customProductModels.find((m) => m.model_code === order.product_model);
       const modelBatchHours = matchedModel?.batch_standard_hours || mainStepsTotalHours;
       const netBatchProdDurationMin = Math.round(modelBatchHours * 60);
 
@@ -1799,7 +1803,9 @@ export function runSmartSchedule(
       const prodEndMin = prodTiming.endMin;
 
       const newBatch: BatchTask = {
-        batch_id: `SIM-B${Math.floor(100 + Math.random() * 900)}`,
+        // Deterministic IDs make recalculation idempotent and prevent random
+        // collisions when a draft is recalculated repeatedly.
+        batch_id: `${order.order_no}-B${String(split.batchIndex).padStart(2, '0')}`,
         order_no: order.order_no,
         customer_name: order.customer_name,
         product_model: order.product_model,
@@ -1852,9 +1858,11 @@ export function recommendReactorForOrder(
     return check.valid;
   });
   if (allowed.length === 0) return null;
-  // 优先匹配能装得下且最贴合的釜
-  const fit = allowed.find((r) => r.rated_kg >= order.qty_kg);
-  return fit || allowed[0];
+  // 优先匹配能装得下且最贴合的釜（best-fit：能装下的最小容量釜）
+  const fitting = allowed.filter((r) => r.max_kg >= order.qty_kg);
+  const pool = fitting.length > 0 ? fitting : allowed;
+  const minCapacity = Math.min(...pool.map((r) => r.max_kg));
+  return pool.find((r) => r.max_kg === minCapacity) || allowed[0];
 }
 
 /**
@@ -2385,7 +2393,12 @@ export function simulateCtpOrder(
     (r) => allowedReactorIds.length === 0 || allowedReactorIds.includes(r.reactor_id)
   );
 
-  const selectedReactor = candidateReactors.find((r) => r.reactor_id === 'R-6000-01') || candidateReactors[0] || reactors[0];
+  // 试算选釜：优先能一趟装下订单量的最小容量釜（best-fit），不认设备编号
+  const fitting = candidateReactors.filter((r) => r.max_kg >= request.qty_kg);
+  const pool = fitting.length > 0 ? fitting : candidateReactors;
+  const minCapacity = pool.length > 0 ? Math.min(...pool.map((r) => r.max_kg)) : 0;
+  const selectedReactor =
+    pool.find((r) => r.max_kg === minCapacity) || candidateReactors[0] || reactors[0];
 
   // 3. 向下拆批计算 (质量 100% 守恒)
   const dummyOrder: ProductionOrder = {
@@ -2406,7 +2419,7 @@ export function simulateCtpOrder(
     completed_good_kg: 0
   };
 
-  const splits = splitOrderBatches(dummyOrder, selectedReactor);
+  const splits = splitOrderBatches(dummyOrder, selectedReactor, reactors, restrictions);
 
   // 4. Copy-on-Write: 拷贝当前反应釜现有批次序列，在其尾部推演空闲时隙
   const existingBatchesOnReactor = currentBatches
@@ -2657,6 +2670,3 @@ export function generateWhatIfScenarios(
     generated_at: new Date().toISOString().slice(0, 16).replace('T', ' ')
   };
 }
-
-
-

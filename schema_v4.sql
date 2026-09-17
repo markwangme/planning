@@ -2,6 +2,22 @@
 -- NOVOLYTE APS V4.0 高级计划与排产系统 生产级数据库 DDL Schema (PostgreSQL / MySQL 兼容)
 -- 设计规范：质量精细度一律采用 numeric(14,3) kg，严禁浮点存储；包含乐观锁 row_version 与幂等键 client_event_id
 -- ==============================================================================
+--
+-- ⚠️ 重要说明：本文件是**目标态参考 DDL，当前运行期不会执行**。
+--
+-- 运行期实际使用的是 Node 内置 node:sqlite，建表语句位于 server/apsDatabase.ts，
+-- 目前只建两张表：aps_state（单行状态快照）与 aps_event_log（幂等事件表）。
+-- 二者关系如下：
+--   · schema_v4.sql  —— PostgreSQL / MySQL 目标态（21 张表），供正式数据库落地时使用；
+--   · apsDatabase.ts —— 本地调试期的 SQLite 持久化，字段语义与目标态对齐但表结构未完全展开。
+--
+-- 因此**不要**在本机直接执行本文件：它使用 PG/MySQL 语法（VARCHAR / NUMERIC / SERIAL 等），
+-- 在 SQLite 上无法运行；且本文件同时包含 aps_*（11 张，目标态）与
+-- tb_*（10 张，附录「V4.0 核心数据库规范原名映射表」）两套语义重叠的建表语句，
+-- 全部为 CREATE TABLE IF NOT EXISTS，同时执行会建出两套并行结构。
+--
+-- 落地正式数据库时，请先确认以 aps_* 为准还是以 tb_* 为准，再删去另一套。
+-- ==============================================================================
 
 -- 1. 反应釜物理机台资产表 (独立实体建模，严禁合并逻辑池)
 CREATE TABLE IF NOT EXISTS aps_reactors (

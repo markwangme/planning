@@ -15,6 +15,7 @@ import {
   Building2,
   Flame,
   PlusCircle,
+  Sparkles,
   X,
   FileSpreadsheet,
   Info,
@@ -35,10 +36,12 @@ import { getTranslations } from '../i18n';
 interface DashboardViewProps {
   orders: ProductionOrder[];
   batches: BatchTask[];
+  unassignedIssues: string[];
   reactors: Reactor[];
   productModels: ProductModelDef[];
   lang?: LanguageCode;
   onAddNewOrder: (order: ProductionOrder) => void;
+  onSimulateSchedule: () => void;
   onNavigateToGantt: () => void;
   onNavigateToShiftReport: () => void;
 }
@@ -46,10 +49,12 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({
   orders,
   batches,
+  unassignedIssues,
   reactors,
   productModels,
   lang = 'zh',
   onAddNewOrder,
+  onSimulateSchedule,
   onNavigateToGantt,
   onNavigateToShiftReport
 }) => {
@@ -185,6 +190,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </button>
 
           <button
+            onClick={onSimulateSchedule}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs"
+            title={lang === 'zh' ? '依据当前订单与主数据生成试算草稿' : 'Generate a trial scheduling draft from current orders and master data'}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            {lang === 'zh' ? '生成试算草稿' : lang === 'en' ? 'Generate Draft' : 'Jana Draf'}
+          </button>
+
+          <button
             onClick={() => {
               const headers = ['Order No', 'Customer', 'Product', 'Qty (kg)', 'Completed (kg)', 'Due Date', 'Status', 'Urgent'];
               const rows = orders.map(o => [
@@ -234,6 +248,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
             // Find associated batches for this order
             const orderBatches = batches.filter((b) => b.order_no === order.order_no);
+            const orderIssues = unassignedIssues.filter((issue) => issue.includes(order.order_no));
 
             return (
               <div
@@ -354,12 +369,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         })
                       ) : (
                         <tr>
-                          <td colSpan={7} className="p-3 text-center text-slate-400">
-                            {lang === 'zh'
-                              ? '该订单尚未在当前计划中生成批次，请点击顶部【生成试算草稿】执行向下分批排程。'
-                              : lang === 'en'
-                              ? 'No batches generated yet. Click [Reschedule] at the top to split and assign batches.'
-                              : 'Tiada kelompok dijana lagi. Klik [Jadual Semula] di atas untuk memecah dan memperuntukkan.'}
+                          <td colSpan={7} className={`p-3 text-center ${orderIssues.length > 0 ? 'text-amber-700' : 'text-slate-400'}`}>
+                            {orderIssues.length > 0 ? (
+                              <div className="space-y-1">
+                                <div className="font-semibold">
+                                  {lang === 'zh' ? '该订单暂未生成可执行批次' : lang === 'en' ? 'No executable batch was generated' : 'Tiada kelompok boleh dilaksanakan dijana'}
+                                </div>
+                                {orderIssues.map((issue) => <div key={issue} className="text-[11px]">{issue}</div>)}
+                              </div>
+                            ) : (
+                              lang === 'zh'
+                                ? '该订单尚未在当前计划中生成批次，请点击顶部【生成试算草稿】执行向下分批排程。'
+                                : lang === 'en'
+                                ? 'No batches generated yet. Click [Generate Draft] at the top to split and assign batches.'
+                                : 'Tiada kelompok dijana lagi. Klik [Jana Draf] di atas untuk memecah dan memperuntukkan.'
+                            )}
                           </td>
                         </tr>
                       )}

@@ -1,3 +1,4 @@
+import { resolveWorkshopId } from '../shared/apsMasterData';
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   CalendarClock,
@@ -76,7 +77,7 @@ import {
   calculateBatchDeviation,
   exportPlanDeviationsToCsv,
   getShiftDurationHours,
-  getShiftBreakWindow,
+  getShiftBreakWindows,
   getDailyGrossWorkingHours,
   getDailyBreakMinutes,
   getDailyNetWorkingHours,
@@ -86,6 +87,7 @@ import { getTranslations } from '../i18n';
 import { DeviationReasonModal } from './DeviationReasonModal';
 import { PlanDeviationMatrix } from './PlanDeviationMatrix';
 import { IndustrialGanttBoard } from './IndustrialGanttBoard';
+import { exportGanttWorkstationExcel } from '../utils/excelExport';
 
 export type TimelineViewScope = 'DAY' | 'WEEK' | 'MONTH';
 export type HourGridResolution = '1H' | '2H' | '4H' | '8H';
@@ -209,6 +211,7 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
   const [manualMoveWarning, setManualMoveWarning] = useState<string | null>(null);
 
   const timelineContainerRef = useRef<HTMLDivElement>(null);
+  const timelineScrollbarRef = useRef<HTMLDivElement>(null);
 
   // Keyboard shortcuts: ESC for fullscreen, + / - for zoom, 0 for reset
   useEffect(() => {
@@ -279,6 +282,8 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
       : lang === 'ms'
       ? ['Ahd', 'Isn', 'Sel', 'Rab', 'Kha', 'Jum', 'Sab']
       : ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const now = new Date();
+    const todayDateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     for (let i = 0; i < daysCount; i++) {
       const dMin = startMin + i * 1440;
@@ -287,7 +292,7 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
       const MM = String(dObj.getMonth() + 1).padStart(2, '0');
       const DD = String(dObj.getDate()).padStart(2, '0');
       const dateStr = `${YYYY}-${MM}-${DD}`;
-      const isToday = dateStr === '2026-09-14';
+      const isToday = dateStr === todayDateStr;
 
       list.push({
         dateStr,
@@ -488,16 +493,14 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
       widthPercent: number;
     }[] = [];
 
-    const activeShifts = shifts.filter((s) => s.isActive && (s.breakMinutes || 0) > 0);
+    const activeShifts = shifts.filter((s) => s.isActive && getShiftBreakWindows(s).length > 0);
     if (activeShifts.length === 0) return intervals;
 
     daysList.forEach((day) => {
       activeShifts.forEach((s) => {
-        const breakWin = getShiftBreakWindow(s);
-        if (!breakWin) return;
-
-        let bStartMin = day.startMin + breakWin.startMin;
-        let bEndMin = day.startMin + breakWin.endMin;
+        getShiftBreakWindows(s).forEach((breakWin, breakIndex) => {
+        const bStartMin = day.startMin + breakWin.startMin;
+        const bEndMin = day.startMin + breakWin.endMin;
 
         const visibleStart = Math.max(timelineStartMin, bStartMin);
         const visibleEnd = Math.min(timelineEndMin, bEndMin);
@@ -507,17 +510,18 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
           const widthPercent = ((visibleEnd - visibleStart) / totalWindowMinutes) * 100;
 
           intervals.push({
-            id: `break-${day.dateStr}-${s.id}`,
+            id: `break-${day.dateStr}-${s.id}-${breakIndex}`,
             shiftId: s.id,
             shiftName: s.name,
-            breakName: s.breakName || '产线休息',
-            breakMinutes: s.breakMinutes,
+            breakName: breakWin.breakName,
+            breakMinutes: breakWin.breakMinutes,
             startMin: visibleStart,
             endMin: visibleEnd,
             offsetPercent: Math.max(0, Math.min(100, offsetPercent)),
             widthPercent: Math.max(0, Math.min(100 - offsetPercent, widthPercent))
           });
         }
+        });
       });
     });
 
@@ -564,8 +568,13 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
 
   const shiftDurationInfo = shiftMetrics;
 
-  // Live Current Time Marker: 2026-09-14 14:30
-  const currentTimeMin = useMemo(() => parseDateToMinutes('2026-09-14 14:30'), []);
+  // Live current time marker uses the local clock; the plan baseline remains
+  // version-controlled while the marker reflects the actual current time.
+  const [currentTimeMin, setCurrentTimeMin] = useState(() => Math.floor(Date.now() / 60000));
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTimeMin(Math.floor(Date.now() / 60000)), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
   const isCurrentTimeInWindow = currentTimeMin >= timelineStartMin && currentTimeMin <= timelineEndMin;
   const currentTimePercent = ((currentTimeMin - timelineStartMin) / totalWindowMinutes) * 100;
 
@@ -579,7 +588,7 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
     if (!reactors || reactors.length === 0) return [];
     if (currentWorkshopId === 'ALL') return reactors;
     const filtered = reactors.filter((r) => {
-      const wId = r.workshop_id || (r.reactor_id === 'R-6000-02' || r.reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01');
+      const wId = r.workshop_id || (resolveWorkshopId(r.reactor_id));
       return wId === currentWorkshopId;
     });
     // If filtering yields nothing (e.g. customized workshop ID not found), safely fallback to all reactors
@@ -595,7 +604,7 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
   const workshopBatches = useMemo(() => {
     if (!batches || batches.length === 0) return [];
     return batches.filter((b) => {
-      const bWorkshop = b.workshop_id || (b.assigned_reactor_id === 'R-6000-02' || b.assigned_reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01');
+      const bWorkshop = b.workshop_id || (resolveWorkshopId(b.assigned_reactor_id));
       if (currentWorkshopId !== 'ALL' && bWorkshop !== currentWorkshopId) {
         // If current workshop has no match, don't completely suppress if user is viewing that reactor
         if (!workshopReactors.some(r => r.reactor_id === b.assigned_reactor_id)) {
@@ -696,6 +705,22 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
     }, 150);
     return () => clearTimeout(timer);
   }, [viewScope, scrollToTargetTime]);
+
+  // 独立底部横向滚动条：与时间轴容器双向同步，便于快速浏览更远日期。
+  useEffect(() => {
+    const container = timelineContainerRef.current;
+    const scrollbar = timelineScrollbarRef.current;
+    const thumb = scrollbar?.firstElementChild as HTMLElement | null;
+    if (!container || !scrollbar || !thumb) return;
+
+    const syncWidth = () => {
+      thumb.style.width = `${container.scrollWidth}px`;
+      scrollbar.scrollLeft = container.scrollLeft;
+    };
+    syncWidth();
+    window.addEventListener('resize', syncWidth);
+    return () => window.removeEventListener('resize', syncWidth);
+  }, [totalGridWidth, viewScope, zoomPercent]);
 
   const handleResetToday = () => {
     setSelectedDateStr('2026-09-14');
@@ -880,7 +905,7 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
       const prodPercent = Math.min(100, Math.round((prodMin / reactorAvailMin) * 100));
       const washPercent = Math.min(100, Math.round((washMin / reactorAvailMin) * 100));
 
-      const nowMin = parseDateToMinutes('2026-09-14 14:30');
+      const nowMin = Math.floor(Date.now() / 60000);
       const activeBatch = rBatches.find((b) => {
         const s = parseDateToMinutes(b.plan_start_time);
         const e = parseDateToMinutes(b.plan_end_time);
@@ -1405,7 +1430,7 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
                   </button>
                   {workshops.map((ws) => {
                     const wsReactors = reactors.filter(
-                      (r) => (r.workshop_id || (r.reactor_id === 'R-6000-02' || r.reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01')) === ws.id
+                      (r) => (r.workshop_id || (resolveWorkshopId(r.reactor_id))) === ws.id
                     );
                     return (
                       <button
@@ -1427,6 +1452,23 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
                     );
                   })}
                 </div>
+              )}
+
+              {activeSubTab === 'gantt' && (
+                <button
+                  onClick={() => void exportGanttWorkstationExcel({
+                    reactors: filteredReactors,
+                    batches: workshopBatches,
+                    columns: timeGridColumns.map((column) => ({ label: column.label, startMin: column.startMin, widthMinutes: gridStepMinutes })),
+                    timelineStartMin,
+                    timelineEndMin
+                  })}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs hover:shadow-xs border bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700"
+                  title="导出甘特图工时泳道为 Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>{lang === 'en' ? 'Export Excel' : lang === 'ms' ? 'Eksport Excel' : '导出 Excel'}</span>
+                </button>
               )}
 
               {/* Full Screen View Toggle Button */}
@@ -1703,7 +1745,15 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
           {/* ========================================================= */}
           <div className={`bg-white border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden ${isFullscreen ? 'flex-1 flex flex-col min-h-0' : ''}`}>
             {/* Scrollable Container with Sticky Left Column */}
-            <div className={`overflow-x-auto relative ${isFullscreen ? 'flex-1 min-h-0 overflow-y-auto' : ''}`} ref={timelineContainerRef}>
+            <div
+              className={`overflow-x-auto relative ${isFullscreen ? 'flex-1 min-h-0 overflow-y-auto' : ''}`}
+              ref={timelineContainerRef}
+              onScroll={(event) => {
+                if (timelineScrollbarRef.current && timelineScrollbarRef.current.scrollLeft !== event.currentTarget.scrollLeft) {
+                  timelineScrollbarRef.current.scrollLeft = event.currentTarget.scrollLeft;
+                }
+              }}
+            >
               <div style={{ minWidth: `${totalGridWidth + 280}px` }} className="flex flex-col">
                 {/* Top Header of Gantt: Date Tier & Explicit Hour Tier (e.g. 2H/cell) */}
                 <div className="flex border-b border-slate-200 bg-slate-50/80 text-xs font-semibold select-none sticky top-0 z-20">
@@ -2147,7 +2197,12 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
                             }
 
                             const dev = calculateBatchDeviation(batch);
-                            const segments = getBatchWorkingSegments(batchStartMin, batchEndMin, shifts);
+                            // 班中休息只影响工时计算，不拆分排产条；订单保持一条连续计划。
+                            const segments = [{
+                              startMin: batchStartMin,
+                              workMinutes: batchEndMin - batchStartMin,
+                              pauseAfterMinutes: undefined
+                            }];
 
                             const hasWash = (batch.preceding_wash_min || 0) > 0;
                             const washStart = batch.preceding_wash_start || batch.plan_start_time;
@@ -2258,7 +2313,18 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
                                                 {batch.batch_id}
                                               </span>
                                               {batch.is_locked && (
-                                                <Lock className="w-3 h-3 text-amber-300 shrink-0" title={lang === 'en' ? 'Locked batch' : '锁定批次'} />
+                                                <span
+                                                  className="shrink-0 inline-flex"
+                                                  title={
+                                                    lang === 'en'
+                                                      ? 'Locked batch'
+                                                      : lang === 'ms'
+                                                      ? 'Kelompok terkunci'
+                                                      : '锁定批次'
+                                                  }
+                                                >
+                                                  <Lock className="w-3 h-3 text-amber-300" />
+                                                </span>
                                               )}
                                             </div>
 
@@ -2325,6 +2391,18 @@ export const GanttWorkstation: React.FC<GanttWorkstationProps> = ({
                 )}
                 </div>
               </div>
+            </div>
+            <div
+              ref={timelineScrollbarRef}
+              onScroll={(event) => {
+                if (timelineContainerRef.current && timelineContainerRef.current.scrollLeft !== event.currentTarget.scrollLeft) {
+                  timelineContainerRef.current.scrollLeft = event.currentTarget.scrollLeft;
+                }
+              }}
+              className="h-3 overflow-x-auto overflow-y-hidden bg-slate-100 border-t border-slate-200 scrollbar-thin scrollbar-thumb-indigo-400 hover:scrollbar-thumb-indigo-600 scrollbar-track-slate-200"
+              aria-label="甘特图日期横向滚动条"
+            >
+              <div style={{ width: `${totalGridWidth + 280}px`, height: '1px' }} />
             </div>
           </div>
         </>

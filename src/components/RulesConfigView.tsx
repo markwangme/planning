@@ -187,7 +187,7 @@ export const RulesConfigView: React.FC<RulesConfigViewProps> = ({
       special_cleaning: false,
       special_scope: 'EITHER',
       approval_status: 'PENDING_CRAFT_APPROVAL', // 待工艺员确认
-      allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02', 'R-6000-03'],
+      allowed_reactors: ['R-1300-01', 'R-6000-01', 'R-6000-02'],
       batch_standard_hours: 10.5,
       recipe_notes: '待工艺员录入工艺要点',
       created_by_role: 'PLANNER',

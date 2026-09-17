@@ -46,6 +46,11 @@ interface WorkshopLiveScreenProps {
   onExitScreenMode?: () => void;
 }
 
+function formatLocalDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export const WorkshopLiveScreen: React.FC<WorkshopLiveScreenProps> = ({
   orders,
   batches,
@@ -61,15 +66,13 @@ export const WorkshopLiveScreen: React.FC<WorkshopLiveScreenProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedReactor, setSelectedReactor] = useState<string>('ALL');
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [simulatedTime, setSimulatedTime] = useState<string>('2026-09-14 14:35:00');
+  const [simulatedTime, setSimulatedTime] = useState<string>(() => formatLocalDateTime(new Date()));
   const [simulatedDelayBatchIds, setSimulatedDelayBatchIds] = useState<string[]>(['SIM-B002']); // default simulation for overdue alert demonstration
 
   // Live ticking clock simulation
   useEffect(() => {
     const timer = setInterval(() => {
-      const now = new Date();
-      const timeStr = `2026-09-14 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-      setSimulatedTime(timeStr);
+      setSimulatedTime(formatLocalDateTime(new Date()));
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -195,7 +198,7 @@ export const WorkshopLiveScreen: React.FC<WorkshopLiveScreenProps> = ({
               )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-2">
-              <span>{lang === 'zh' ? '班次: 中班 (16:00 - 24:00)' : lang === 'en' ? 'Shift: Afternoon (16:00 - 24:00)' : 'Syif: Petang (16:00 - 24:00)'}</span>
+              <span>{lang === 'zh' ? '当前班次: 按系统排班计算' : lang === 'en' ? 'Current shift: Based on system calendar' : 'Syif semasa: Berdasarkan kalendar sistem'}</span>
               <span>·</span>
               <span>{lang === 'zh' ? '工序级节拍跟踪 & 质量放行联动' : lang === 'en' ? '6-Step Takt & Quality Interlock' : 'Takt 6-Langkah & Saling Kunci Kualiti'}</span>
               <span>·</span>

@@ -50,8 +50,8 @@ export const WORKSHOP_DEFINITIONS: WorkshopDef[] = [
     shortName: '二期车间 (扩产专线)',
     code: 'PLANT-02',
     building: '乙类防爆净化厂房 C区/D区',
-    description: '涵盖强腐蚀高镍专线釜 (R-6000-02) 及储能/高电压配制釜 (R-6000-03)',
-    reactorCount: 2,
+    description: '涵盖强腐蚀高镍专线釜 (R-6000-02)，兼储能/高电压配制用途',
+    reactorCount: 1,
     managerName: '刘车间主任 (二期)'
   }
 ];
@@ -82,10 +82,21 @@ export interface ShiftDef {
   breakMinutes: number; // 每班休息时间 (分钟) e.g. 60
   breakStartTime?: string; // HH:mm e.g. "12:00" (班中休息开始时间)
   breakName: string; // e.g. "午餐及班中休息"
+  /** Multiple breaks in one shift. Legacy breakMinutes/breakStartTime remain supported. */
+  breaks?: ShiftBreak[];
   headcount: number; // 录入生产员工数量 (操作工人数)
   supervisorName: string;
   isActive: boolean;
+  /** 工作日：JavaScript 星期编号 0=周日，1=周一 ... 6=周六；缺省表示每天上班。 */
+  workingDays?: number[];
   notes?: string;
+}
+
+export interface ShiftBreak {
+  id?: string;
+  startTime: string;
+  durationMinutes: number;
+  name?: string;
 }
 
 export interface StaffingConfig {
@@ -189,10 +200,35 @@ export interface WashMatrixRule {
 
 export type ProcessNodeId = 1 | 2 | 3 | 4 | 5 | 6;
 
+/**
+ * 标准工序代码。这 6 个值带有**排产与报工语义**，下游逻辑直接依赖：
+ *   - `FILL`  灌装工序，只有它的合格量参与订单完成率累计；
+ *   - `CLEAN` 独立洗釜，不计入有效生产工时（AdminConfigView 汇总时排除）；
+ *   - `QC`    取样检测，决定报工模板显示水分/游离酸录入项；
+ *   - `SOLVENT` / `SALT` / `MIX` 为投料与混合工序。
+ *
+ * 注意：工艺员可在后台「增加工序节点」中录入**自定义工序代码**
+ * （表单占位符即示例 `VACUUM` / `FILTER_2`），因此 `ProcessNodeDef.code`
+ * 的类型是开放的 `string`，而非本枚举。自定义代码**不得复用**上述 6 个标准值，
+ * 否则会污染完成率累计与工时统计。
+ */
+export type ProcessNodeCode = 'SOLVENT' | 'SALT' | 'MIX' | 'QC' | 'FILL' | 'CLEAN';
+
+/** 标准工序代码清单，供后台表单校验与提示使用 */
+export const STANDARD_PROCESS_NODE_CODES: readonly ProcessNodeCode[] = [
+  'SOLVENT',
+  'SALT',
+  'MIX',
+  'QC',
+  'FILL',
+  'CLEAN',
+];
+
 export interface ProcessNodeDef {
   id: ProcessNodeId;
   name: string;
-  code: 'SOLVENT' | 'SALT' | 'MIX' | 'QC' | 'FILL' | 'CLEAN';
+  /** 标准工序代码之一（见 `ProcessNodeCode`），或工艺员自定义代码 */
+  code: string;
   standard_hours: number;
   description: string;
   requires_release?: boolean; // 工序4取样放行才能进入工序5

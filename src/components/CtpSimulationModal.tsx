@@ -66,7 +66,7 @@ export const CtpSimulationModal: React.FC<CtpSimulationModalProps> = ({
   const [productModel, setProductModel] = useState<string>('SIM-MODEL-A');
   const [qtyKg, setQtyKg] = useState<number>(10000);
   const [deliveryDate, setDeliveryDate] = useState<string>('2026-09-17 18:00');
-  const [priority, setPriority] = useState<'URGENT' | 'HIGH' | 'MEDIUM' | 'LOW'>('HIGH');
+  const [priority, setPriority] = useState<ProductionOrder['priority']>('HIGH');
   const [allowSplit, setAllowSplit] = useState<boolean>(true);
 
   // Run CTP simulation on Copy-on-Write sandbox
@@ -202,13 +202,12 @@ export const CtpSimulationModal: React.FC<CtpSimulationModalProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">{tr.ctpModal.priority}</label>
                 <select
                   value={priority}
-                  onChange={(e) => setPriority(e.target.value as any)}
+                  onChange={(e) => setPriority(e.target.value as ProductionOrder['priority'])}
                   className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-hidden bg-white"
                 >
-                  <option value="URGENT">{tr.common.urgent}</option>
-                  <option value="HIGH">{tr.common.high}</option>
-                  <option value="MEDIUM">{tr.common.medium}</option>
-                  <option value="LOW">{tr.common.low}</option>
+                  <option value="URGENT">{tr.dashboard.priorityUrgent}</option>
+                  <option value="HIGH">{tr.dashboard.priorityHigh}</option>
+                  <option value="NORMAL">{tr.dashboard.priorityNormal}</option>
                 </select>
               </div>
             </div>

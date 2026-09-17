@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { Header } from './components/Header.tsx';
+import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { GanttWorkstation } from './components/GanttWorkstation.tsx';
 import { ShiftReportingView } from './components/ShiftReportingView.tsx';
 import { RulesConfigView } from './components/RulesConfigView.tsx';
@@ -36,6 +37,7 @@ import {
   WhatIfScenario,
   WORKSHOP_DEFINITIONS
 } from './types/aps';
+import { getTranslations } from './i18n';
 import {
   INITIAL_REACTORS,
   INITIAL_ORDERS_V2,
@@ -59,7 +61,8 @@ import {
   resetDatabaseToDefault,
   exportDatabaseBackup,
   importDatabaseBackup,
-  ApsDatabase
+  ApsDatabase,
+  fetchDatabaseFromServer
 } from './utils/database';
 import {
   CheckCircle2,
@@ -146,6 +149,7 @@ export default function App() {
 
   // Last Saved Database Timestamp
   const [lastDbSaveTime, setLastDbSaveTime] = useState<string>(initialDb.lastSavedAt || new Date().toISOString());
+  const [isDatabaseHydrated, setIsDatabaseHydrated] = useState(false);
 
   // Notifications
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'warning' | 'info' } | null>(null);
@@ -155,10 +159,46 @@ export default function App() {
     setTimeout(() => setNotification(null), 4500);
   };
 
+  // The server-side SQLite snapshot is authoritative when available. Do not
+  // let the first render overwrite it with a stale browser-local copy.
+  useEffect(() => {
+    let cancelled = false;
+    fetchDatabaseFromServer().then((serverDb) => {
+      if (cancelled) return;
+      if (serverDb) {
+        setSystemConfig(serverDb.systemConfig);
+        setWorkshops(serverDb.workshops);
+        setUserAccounts(serverDb.userAccounts);
+        setWashRuleCards(serverDb.washRuleCards);
+        setReactors(serverDb.reactors);
+        setOrders(serverDb.orders);
+        setBatches(serverDb.batches);
+        setRestrictions(serverDb.restrictions);
+        setWashRules(serverDb.washRules);
+        setProductModels(serverDb.productModels);
+        setProcessNodes(serverDb.processNodes);
+        setShifts(serverDb.shifts);
+        setStaffingConfig(serverDb.staffingConfig);
+        setUnassignedIssues(serverDb.unassignedIssues);
+        setPublishedVersion(serverDb.publishedVersion);
+        setDraftVersion(serverDb.draftVersion);
+        setIsDraftActive(serverDb.isDraftActive);
+        setCurrentRole(serverDb.currentRole);
+        setAuthenticatedRoles(serverDb.authenticatedRoles);
+        setLanguage(serverDb.language);
+        setCurrentWorkshopId(serverDb.currentWorkshopId);
+        setLastDbSaveTime(serverDb.lastSavedAt);
+      }
+      setIsDatabaseHydrated(true);
+    }).catch(() => setIsDatabaseHydrated(true));
+    return () => { cancelled = true; };
+  }, []);
+
   // Auto Persistence Effect: Save entire state to database on any update
   useEffect(() => {
+    if (!isDatabaseHydrated) return;
     const currentDbState: ApsDatabase = {
-      schemaVersion: 2,
+      schemaVersion: 4,
       lastSavedAt: new Date().toISOString(),
       systemConfig,
       workshops,
@@ -206,13 +246,14 @@ export default function App() {
     currentRole,
     authenticatedRoles,
     language,
-    currentWorkshopId
+    currentWorkshopId,
+    isDatabaseHydrated
   ]);
 
   // Database Management Handlers
   const handleExportDatabase = useCallback(() => {
     const currentDbState: ApsDatabase = {
-      schemaVersion: 2,
+      schemaVersion: 4,
       lastSavedAt: new Date().toISOString(),
       systemConfig,
       workshops,
@@ -350,7 +391,8 @@ export default function App() {
       strategy,
       processNodes,
       shifts,
-      staffingConfig
+      staffingConfig,
+      productModels
     );
 
     setBatches(result.batches);
@@ -360,7 +402,7 @@ export default function App() {
       `系统已自动依据【计划员】产品工序耗时/洗釜规则及【生产主管】排班班次/员工人数完成有限产能自动排产！生成草稿版本 ${draftVersion}`,
       'info'
     );
-  }, [orders, reactors, restrictions, washRules, batches, draftVersion, processNodes, shifts, staffingConfig]);
+  }, [orders, reactors, restrictions, washRules, batches, draftVersion, processNodes, shifts, staffingConfig, productModels]);
 
   // Handle Shift changes: Automatically adjust schedule batches, accounting for working hours and breaks
   const handleUpdateShifts = useCallback((newShifts: ShiftDef[]) => {
@@ -375,13 +417,14 @@ export default function App() {
       'SETUP_MINIMIZE',
       processNodes,
       newShifts,
-      staffingConfig
+      staffingConfig,
+      productModels
     );
     setBatches(result.batches);
     setUnassignedIssues(result.unassignedIssues);
     setIsDraftActive(true);
     showNotification('班次与休息时间设置已更新，甘特图排程已随之自动重新排产计算完成！', 'info');
-  }, [orders, reactors, restrictions, washRules, batches, processNodes, staffingConfig]);
+  }, [orders, reactors, restrictions, washRules, batches, processNodes, staffingConfig, productModels]);
 
   // 2. Publish schedule with hard constraints check & Server-Side Demo Isolation
   const handlePublishSchedule = async () => {
@@ -393,6 +436,20 @@ export default function App() {
 
     if (hasViolations) {
       showNotification('【发布阻断】当前计划存在违反专线隔离或设备白名单的硬冲突，禁止发布！', 'warning');
+      return;
+    }
+
+    // Orders and batches must reconcile before a plan can reach execution.
+    const plannedByOrder = batches.reduce<Record<string, number>>((acc, batch) => {
+      acc[batch.order_no] = (acc[batch.order_no] || 0) + (Number(batch.batch_qty_kg) || 0);
+      return acc;
+    }, {});
+    const quantityMismatch = orders.find((order) => {
+      const planned = plannedByOrder[order.order_no] || 0;
+      return planned > order.qty_kg + 0.001;
+    });
+    if (quantityMismatch) {
+      showNotification(`【发布阻断】订单 ${quantityMismatch.order_no} 的批次计划量超过订单量，请先完成数量对账！`, 'warning');
       return;
     }
 
@@ -446,7 +503,7 @@ export default function App() {
     if (!targetBatch) return { success: false, message: '未找到对应批次' };
 
     // 冻结保护：未来 24 小时内锁定的任务不能随意挪动
-    if (targetBatch.is_locked && targetBatch.is_actual) {
+    if (targetBatch.is_locked) {
       return {
         success: false,
         message: '【冻结计划拦截】该任务处于已开工/未来24小时锁定状态，不可直接拖拽变更！须先申请主管审批解锁。'
@@ -543,51 +600,62 @@ export default function App() {
     batchId: string,
     stepId: ProcessNodeId,
     status: StepProgressStatus,
-    goodFilledKg?: number,
-    qcStatus?: QcReleaseStatus,
-    actualEndTime?: string
-  ) => {
+    payload: {
+      actual_at: string;
+      forecast_end_at?: string;
+      pause_reason?: string;
+      qc_status?: QcReleaseStatus;
+      filled_good_kg?: number;
+      operator_name: string;
+      notes?: string;
+    }
+  ): { success: boolean; message?: string } => {
+    const targetBatch = batches.find((b) => b.batch_id === batchId);
+    if (!targetBatch) {
+      const message = `未找到批次【${batchId}】，报工数据未写入`;
+      showNotification(message, 'warning');
+      return { success: false, message };
+    }
+
+    const goodFilledKg = payload.filled_good_kg;
+
     setBatches((prev) =>
       prev.map((b) => {
-        if (b.batch_id === batchId) {
-          const updated = {
-            ...b,
-            current_step: stepId,
-            step_status: status,
-            is_actual: true,
-            is_locked: true,
-            ...(goodFilledKg !== undefined ? { good_filled_kg: goodFilledKg } : {}),
-            ...(qcStatus ? { qc_status: qcStatus } : {}),
-            ...(actualEndTime ? { actual_end_time: actualEndTime } : {})
-          };
-          return updated;
-        }
-        return b;
+        if (b.batch_id !== batchId) return b;
+        return {
+          ...b,
+          current_step: stepId,
+          step_status: status,
+          is_actual: true,
+          is_locked: true,
+          ...(goodFilledKg !== undefined ? { good_filled_kg: goodFilledKg } : {}),
+          ...(payload.qc_status ? { qc_status: payload.qc_status } : {}),
+          actual_end_time: payload.actual_at,
+          ...(payload.pause_reason ? { pause_reason: payload.pause_reason } : {}),
+          ...(payload.notes ? { notes: payload.notes } : {})
+        };
       })
     );
 
-    // If order is completed or filling reported, update order completed_good_kg
+    // 订单完成率只累计合格灌装量 (good_filled_kg)，与灌装工序绑定
     if (goodFilledKg !== undefined && goodFilledKg > 0) {
-      const batch = batches.find((b) => b.batch_id === batchId);
-      if (batch) {
-        setOrders((prev) =>
-          prev.map((o) => {
-            if (o.order_no === batch.order_no) {
-              const prevCompleted = o.completed_good_kg || 0;
-              const newCompleted = prevCompleted + goodFilledKg;
-              return {
-                ...o,
-                completed_good_kg: newCompleted,
-                status: newCompleted >= o.qty_kg ? 'COMPLETED' : 'IN_PROGRESS'
-              };
-            }
-            return o;
-          })
-        );
-      }
+      setOrders((prev) =>
+        prev.map((o) => {
+          if (o.order_no !== targetBatch.order_no) return o;
+          const newCompleted = (o.completed_good_kg || 0) + goodFilledKg;
+          return {
+            ...o,
+            completed_good_kg: newCompleted,
+            // 状态枚举里只有 IN_PRODUCTION；原先写 IN_PROGRESS 会让看板徽章永远匹配不上
+            status: newCompleted >= o.qty_kg ? 'COMPLETED' : 'IN_PRODUCTION'
+          };
+        })
+      );
     }
 
-    showNotification(`已保存批次【${batchId}】工序 #${stepId} 报工数据，进度已同步至甘特图与看板`, 'success');
+    const message = `已保存批次【${batchId}】工序 #${stepId} 报工数据，进度已同步至甘特图与看板`;
+    showNotification(message, 'success');
+    return { success: true, message };
   };
 
   // 7. Add new Production Order from Dashboard
@@ -604,7 +672,8 @@ export default function App() {
       'SETUP_MINIMIZE',
       processNodes,
       shifts,
-      staffingConfig
+      staffingConfig,
+      productModels
     );
     setBatches(result.batches);
     setUnassignedIssues(result.unassignedIssues);
@@ -619,8 +688,30 @@ export default function App() {
     });
   }, [batches, restrictions]);
 
+  // 渲染出错时用于告知用户是哪个标签页坏了
+  const activeTabLabel = useMemo(() => {
+    const h = getTranslations(language).header;
+    switch (currentTab) {
+      case 'gantt':
+        return h.tabGantt;
+      case 'reporting':
+        return h.tabReporting;
+      case 'rules':
+        return h.tabRules;
+      case 'dashboard':
+        return h.tabDashboard;
+      case 'mes':
+        return h.tabMes;
+      case 'admin':
+        return h.tabAdmin;
+      default:
+        return currentTab;
+    }
+  }, [currentTab, language]);
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased selection:bg-blue-100 selection:text-blue-900">
+    <ErrorBoundary lang={language}>
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased selection:bg-blue-100 selection:text-blue-900">
       {/* Redesigned Navigation Header with Zero Scrollbar & Database Persistence Status & Workshop Switcher */}
       <Header
         currentTab={currentTab}
@@ -701,6 +792,8 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className={`flex-1 w-full mx-auto px-2 sm:px-4 lg:px-6 py-3 ${currentTab === 'gantt' ? 'w-full max-w-full' : 'max-w-7xl'}`}>
+        {/* 单个视图崩溃不再拖垮整页：切换标签页即自动恢复 */}
+        <ErrorBoundary resetKey={currentTab} label={activeTabLabel} lang={language}>
         {currentTab === 'gantt' && (
           <div className="relative">
             {isDemoMode && (
@@ -766,9 +859,11 @@ export default function App() {
           <DashboardView
             orders={orders}
             batches={batches}
+            unassignedIssues={unassignedIssues}
             reactors={reactors}
             productModels={productModels}
             onAddNewOrder={handleAddNewOrder}
+            onSimulateSchedule={() => handleSimulateSchedule('SETUP_MINIMIZE')}
             onNavigateToGantt={() => setCurrentTab('gantt')}
             onNavigateToShiftReport={() => setCurrentTab('reporting')}
           />
@@ -806,8 +901,10 @@ export default function App() {
             lastDbSaveTime={lastDbSaveTime}
             orderCount={orders.length}
             batchCount={batches.length}
+            batches={batches}
           />
         )}
+        </ErrorBoundary>
       </main>
 
       {/* RBAC Password Verification Modal */}
@@ -882,6 +979,7 @@ export default function App() {
           </span>
         </div>
       </footer>
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }

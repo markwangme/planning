@@ -3,11 +3,23 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { createDurableApsDatabase } from "./server/apsDatabase";
+import {
+  SEED_REACTOR_MASTER,
+  buildDeviceMaster,
+  assignBulkReactors,
+  findMissingMasterData,
+  findOrphanReactorIds,
+  planBatchQuantities,
+  type DeviceMaster,
+} from "./src/shared/apsMasterData";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+// 本地调试默认只监听回环地址；生产环境默认监听所有网卡，便于反向代理或容器访问。
+const HOST = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
 
 app.use(express.json({ limit: "10mb" }));
 
@@ -29,16 +41,88 @@ function getGeminiClient(): GoogleGenAI | null {
 
 // Health check endpoint
 app.get("/api/health", (_req, res) => {
+  const master = loadDeviceMaster();
+  const missingMasterData = findMissingMasterData(master);
   res.json({
     status: "ok",
     aiEnabled: Boolean(process.env.GEMINI_API_KEY),
+    storage: { type: "sqlite-wal", path: durableDatabase.dbPath },
+    bind: `${HOST}:${PORT}`,
+    master_data: {
+      // 权威来源是后台维护的设备表，不是代码里的种子
+      source: master.reactors.length > 0 ? "ADMIN_MAINTAINED" : "SEED_FALLBACK",
+      reactor_count: master.reactors.length,
+      bulk_max_kg: master.bulkMaxKg,
+      bulk_min_kg: master.bulkMinKg,
+      missing: missingMasterData,
+      ready: missingMasterData.length === 0,
+    },
     timestamp: new Date().toISOString(),
   });
 });
 
-// Database in-memory / cache store
-let serverDatabaseCache: any = null;
-const processedClientEventIds = new Set<string>();
+// Durable local database: SQLite WAL + transactional state + idempotent event log.
+const durableDatabase = createDurableApsDatabase();
+process.once("SIGINT", () => { durableDatabase.close(); process.exit(0); });
+process.once("SIGTERM", () => { durableDatabase.close(); process.exit(0); });
+
+/**
+ * 设备主数据的唯一入口 —— 从后台维护的持久化状态读取。
+ *
+ * 口径：釜台数与最小/最大投料量一律以后台维护为准。
+ *   - 后台已维护设备表（哪怕是空数组）→ 原样采用，不做任何覆盖或删除；
+ *   - 从未建过库（状态为空）→ 用种子初始化，这是种子唯一的用途。
+ */
+function loadDeviceMaster(): DeviceMaster {
+  const state = durableDatabase.loadState() as { reactors?: unknown } | null;
+  const maintained = state && Array.isArray((state as { reactors?: unknown }).reactors)
+    ? ((state as { reactors: unknown[] }).reactors as never[])
+    : null;
+  if (maintained === null) {
+    // 从未初始化过：用种子建库
+    return buildDeviceMaster(SEED_REACTOR_MASTER);
+  }
+  return buildDeviceMaster(maintained);
+}
+
+function isFinitePositive(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+// ------------------------------------------------------------------------------
+// 向下分批（满批 + 尾批）
+// 算法与设备主数据统一收敛到 src/shared/apsMasterData.ts —— 前后端共用同一实现，
+// 不再各自维护一份容量/上下限常量（历史上两处实现已经发生过发散）。
+// 本函数仅做「服务端响应格式」适配，不承载任何业务规则。
+// ------------------------------------------------------------------------------
+
+interface SuggestedBatch {
+  reactor_code: string;
+  qty_kg: number;
+  is_tail: boolean;
+}
+
+function splitOrderIntoBatches(
+  qtyKg: number,
+  master: DeviceMaster,
+): { batches: SuggestedBatch[]; warnings: string[] } {
+  // 环境变量 MIN_BATCH_KG 仅用于联调临时覆盖；未设置时以下限取自后台维护的设备表
+  const rawOverride = Number(process.env.MIN_BATCH_KG);
+  const bulkMinKg = Number.isFinite(rawOverride) && rawOverride > 0 ? rawOverride : master.bulkMinKg;
+
+  const { batches: planned, warnings } = planBatchQuantities(qtyKg, { master, bulkMinKg });
+  const reactorCodes = assignBulkReactors(planned, master);
+
+  return {
+    batches: planned.map((batch, index) => ({
+      // 低于设备最小投料量的批次只能作为未分配建议返回，不能伪装成已排到某台设备。
+      reactor_code: batch.below_min ? 'UNASSIGNED' : reactorCodes[index],
+      qty_kg: batch.qty_kg,
+      is_tail: batch.is_tail,
+    })),
+    warnings,
+  };
+}
 
 // ==============================================================================
 // V4.0 RESTful API Contracts (严格对照 V4.0 技术规范 Page 8 与 Page 9)
@@ -48,44 +132,43 @@ const processedClientEventIds = new Set<string>();
 app.post("/api/v1/orders/ctp-simulate", (req, res) => {
   try {
     const { customer_code, product_model, order_qty_kg, customer_due_at } = req.body;
-    const qty = Number(order_qty_kg) || 10000;
-
-    // 向下拆批计算逻辑 (100% 质量守恒)
-    // 6t 釜额定 6000kg, 1.3t 釜额定 1300kg
-    const suggestedBatches: Array<{ reactor_code: string; qty_kg: number }> = [];
-    let remainingKg = qty;
-
-    if (remainingKg >= 6000) {
-      // 优先满批分配给 6T 釜 1 号与 2 号
-      suggestedBatches.push({ reactor_code: "R-6000-01", qty_kg: 6000.0 });
-      remainingKg -= 6000;
-      if (remainingKg > 0) {
-        if (remainingKg >= 4000) {
-          suggestedBatches.push({ reactor_code: "R-6000-02", qty_kg: remainingKg });
-        } else if (remainingKg <= 1300) {
-          suggestedBatches.push({ reactor_code: "R-1300-01", qty_kg: remainingKg });
-        } else {
-          suggestedBatches.push({ reactor_code: "R-6000-02", qty_kg: remainingKg });
-        }
-      }
-    } else if (remainingKg <= 1300) {
-      suggestedBatches.push({ reactor_code: "R-1300-01", qty_kg: remainingKg });
-    } else {
-      suggestedBatches.push({ reactor_code: "R-6000-01", qty_kg: remainingKg });
+    const qty = Number(order_qty_kg);
+    if (!isFinitePositive(qty)) {
+      return res.status(400).json({ error_code: "INVALID_ORDER_QTY", message: "order_qty_kg 必须为正数" });
     }
+
+    // 向下拆批计算逻辑 (100% 质量守恒)；设备口径来自后台维护的设备表
+    const master = loadDeviceMaster();
+    const { batches: suggestedBatches, warnings: splitWarnings } = splitOrderIntoBatches(qty, master);
 
     // 承诺交期估算 (FPSD - Final Promised Shipping Date)
     const dueDate = customer_due_at ? new Date(customer_due_at) : new Date(Date.now() + 5 * 86400000);
     // 提前约 12~24 小时交付
     const fpsd = new Date(dueDate.getTime() - 14 * 3600000);
 
+    const missingMasterData = findMissingMasterData(master);
+
     return res.json({
       fpsd_promised_at: fpsd.toISOString(),
-      atb_status: "READY",
+      atb_status: splitWarnings.length > 0 || missingMasterData.length > 0 ? "REVIEW_REQUIRED" : "READY",
       customer_code: customer_code || "CUST-001",
       product_model: product_model || "ELE-9002A",
       order_qty_kg: qty,
-      suggested_batches: suggestedBatches
+      // 下限/上限均取自后台维护的设备表；null 表示工艺未确认，此时不做下限校验
+      min_batch_kg: master.bulkMinKg,
+      bulk_max_kg: master.bulkMaxKg,
+      master_data_source: master.reactors.length > 0 ? "ADMIN_MAINTAINED" : "SEED_FALLBACK",
+      reactors: master.reactors.map((r) => ({
+        reactor_id: r.reactor_id,
+        workshop_id: r.workshop_id,
+        min_kg: r.min_kg,
+        max_kg: r.max_kg,
+      })),
+      missing_master_data: missingMasterData,
+      batch_count: suggestedBatches.length,
+      total_batch_kg: Number(suggestedBatches.reduce((sum, b) => sum + b.qty_kg, 0).toFixed(3)),
+      suggested_batches: suggestedBatches,
+      warnings: splitWarnings
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || "CTP simulation error" });
@@ -98,13 +181,27 @@ app.post("/api/v1/plans/:id/publish", (req, res) => {
     const planId = req.params.id;
     const { is_demo, publisher_id, version_no, publisher_name, frozen_until } = req.body;
 
-    // 核心硬约束：is_demo 为 true 时强行拒绝发布至车间执行 (Page 8 标准格式)
-    if (is_demo === true) {
+    if (!planId || !version_no || !publisher_id || !publisher_name) {
+      return res.status(400).json({ status: "REJECTED", error_code: "INVALID_PUBLISH_PAYLOAD", message: "发布请求缺少版本或发布人信息" });
+    }
+
+    // 核心硬约束：试算版本 (is_demo) 或主数据未齐套时，强行拒绝发布至车间执行
+    // missing_master_data 由后台维护的设备表实时计算，不再写死固定字符串
+    const master = loadDeviceMaster();
+    const missingMasterData = findMissingMasterData(master);
+    const blockedByDemo = is_demo === true;
+    if (blockedByDemo || missingMasterData.length > 0) {
+      const blockedBy: string[] = [];
+      if (blockedByDemo) blockedBy.push("IS_DEMO");
+      if (missingMasterData.length > 0) blockedBy.push("MASTER_DATA_INCOMPLETE");
       return res.status(400).json({
         status: "REJECTED",
-        error_code: "IS_DEMO_PLAN_BLOCKED",
-        message: "当前排产版本存在未确认主数据 (is_demo=true)，服务端物理拒绝发布上线！",
-        missing_master_data: ["R-1300-01.min_kg IS NULL"],
+        error_code: blockedByDemo ? "IS_DEMO_PLAN_BLOCKED" : "MASTER_DATA_INCOMPLETE",
+        message: blockedByDemo
+          ? "当前版本为试算草稿 (is_demo=true)，服务端物理拒绝发布至车间执行！"
+          : "设备主数据未齐套，服务端拒绝发布上线！",
+        blocked_by: blockedBy,
+        missing_master_data: missingMasterData,
         remediation: "请在确认原材料齐套、工艺参数放行无误后，生成正式生产方案后再行发布。"
       });
     }
@@ -142,9 +239,16 @@ app.post("/api/v1/operations/events", (req, res) => {
     if (!client_event_id) {
       return res.status(400).json({ error: "Missing required client_event_id for idempotency check" });
     }
+    if (!batch_no || !operation_code || !event_type || !actual_at) {
+      return res.status(400).json({ error: "batch_no、operation_code、event_type、actual_at 均为必填项" });
+    }
+    if (operation_code === "FILL" && filled_good_kg !== undefined && !Number.isFinite(Number(filled_good_kg))) {
+      return res.status(400).json({ error: "filled_good_kg 必须为有效数字" });
+    }
 
     // 幂等性校验：如果该事件ID已经处理过，直接返回成功，不重复累加数量
-    if (processedClientEventIds.has(client_event_id)) {
+    const isNewEvent = durableDatabase.recordEvent(client_event_id, req.body);
+    if (!isNewEvent) {
       return res.json({
         status: "SUCCESS",
         idempotent: true,
@@ -154,9 +258,6 @@ app.post("/api/v1/operations/events", (req, res) => {
         message: "事件已幂等处理（重复提交已忽略，避免数据双重记账）"
       });
     }
-
-    // 记录该幂等键
-    processedClientEventIds.add(client_event_id);
 
     return res.json({
       status: "SUCCESS",
@@ -178,11 +279,73 @@ app.post("/api/v1/operations/events", (req, res) => {
 // 兼容旧端点 /api/v1/reports/event
 app.post("/api/v1/reports/event", (req, res) => {
   const { client_event_id } = req.body;
-  if (client_event_id && processedClientEventIds.has(client_event_id)) {
+  if (client_event_id && !durableDatabase.recordEvent(client_event_id, req.body)) {
     return res.json({ success: true, idempotent: true, message: "事件已幂等处理" });
   }
-  if (client_event_id) processedClientEventIds.add(client_event_id);
   return res.json({ success: true, idempotent: false, message: "报工已记录" });
+});
+
+// (3b) 报工事件读取与结算：POST 侧只负责记账，这里提供对账所需的读取与聚合口径
+// 历史上事件只写不读，接口文案却承诺「FILL累计合格量据此统一结算」，属于契约与实现不一致。
+app.get("/api/v1/operations/events", (req, res) => {
+  const limit = Number(req.query.limit);
+  const events = durableDatabase.listEvents(Number.isFinite(limit) && limit > 0 ? limit : 200);
+  return res.json({
+    success: true,
+    count: events.length,
+    events: events.map((e) => {
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(e.payload_json);
+      } catch {
+        payload = null;
+      }
+      return {
+        event_id: e.event_id,
+        client_event_id: e.client_event_id,
+        created_at: e.created_at,
+        payload,
+      };
+    }),
+  });
+});
+
+// (3c) 订单完成率结算：以 FILL 事件的累计合格灌装量 ÷ 订单量
+app.get("/api/v1/orders/:orderNo/completion", (req, res) => {
+  try {
+    const orderNo = req.params.orderNo;
+    const totalsByBatch = durableDatabase.sumFilledGoodKgByBatch();
+
+    const state = durableDatabase.loadState() as { orders?: any[] } | null;
+    const order = state?.orders?.find((o) => o?.order_no === orderNo);
+
+    // 订单可能只存在于前端本地状态，此时仍返回批次级累计量，便于对账
+    const orderQtyKg = Number(order?.qty_kg);
+    const batchNos: string[] = Array.isArray(order?.split_batches)
+      ? order.split_batches.map((b: any) => b?.batch_no).filter((v: unknown): v is string => typeof v === "string")
+      : Object.keys(totalsByBatch);
+
+    const batches = batchNos.map((batchNo) => ({
+      batch_no: batchNo,
+      filled_good_kg: totalsByBatch[batchNo] ?? 0,
+    }));
+    const filledGoodKg = Number(batches.reduce((sum, b) => sum + b.filled_good_kg, 0).toFixed(3));
+
+    const hasOrder = Number.isFinite(orderQtyKg) && orderQtyKg > 0;
+    return res.json({
+      success: true,
+      order_no: orderNo,
+      order_qty_kg: hasOrder ? orderQtyKg : null,
+      filled_good_kg: filledGoodKg,
+      completion_rate: hasOrder ? Number((filledGoodKg / orderQtyKg).toFixed(4)) : null,
+      batches,
+      settlement_basis: "Σ FILL 事件 filled_good_kg ÷ 订单量（重复 client_event_id 不重复计量）",
+      note: hasOrder ? undefined : "订单主数据不在服务端状态中，仅返回批次级累计合格量",
+      settled_at: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to settle order completion" });
+  }
 });
 
 // (4) 未来 MES 系统接口与数据归属预留 (Page 9: external_id_map 映射与 integration_message 消息收发箱)
@@ -246,8 +409,9 @@ app.get("/api/v1/materials/inventory", (_req, res) => {
 
 // Database Persistence Endpoints
 app.get("/api/database/load", (_req, res) => {
-  if (serverDatabaseCache) {
-    return res.json(serverDatabaseCache);
+  const state = durableDatabase.loadState();
+  if (state) {
+    return res.json(state);
   }
   return res.status(404).json({ error: "No saved database on server" });
 });
@@ -255,21 +419,22 @@ app.get("/api/database/load", (_req, res) => {
 app.post("/api/database/save", (req, res) => {
   try {
     const db = req.body;
-    if (db && typeof db === "object") {
-      serverDatabaseCache = {
-        ...db,
-        serverSavedAt: new Date().toISOString(),
-      };
-      return res.json({ success: true, savedAt: serverDatabaseCache.serverSavedAt });
+    if (db && typeof db === "object" && Array.isArray(db.reactors) && Array.isArray(db.orders) && Array.isArray(db.batches)) {
+      durableDatabase.saveState(db);
+      return res.json({ success: true, savedAt: new Date().toISOString(), storage: durableDatabase.dbPath });
     }
-    return res.status(400).json({ error: "Invalid database payload" });
+    return res.status(400).json({ error: "Invalid database payload: reactors、orders、batches must be arrays" });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || "Failed to save database" });
   }
 });
 
 app.post("/api/database/reset", (_req, res) => {
-  serverDatabaseCache = null;
+  try {
+    durableDatabase.resetState();
+  } catch (error) {
+    return res.status(500).json({ success: false, error: "Failed to reset APS database state" });
+  }
   return res.json({ success: true, message: "Server database reset to baseline" });
 });
 
@@ -404,8 +569,11 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`APS Intelligent Server running on http://0.0.0.0:${PORT}`);
+  // 默认只监听回环地址，避免局域网其他机器直接访问调试实例；
+  // 如需局域网联调，显式设置环境变量 HOST=0.0.0.0
+  app.listen(PORT, HOST, () => {
+    const shown = HOST === "0.0.0.0" ? "localhost" : HOST;
+    console.log(`APS Intelligent Server running on http://${shown}:${PORT} (bind ${HOST})`);
   });
 }
 

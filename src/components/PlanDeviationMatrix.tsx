@@ -1,3 +1,4 @@
+import { resolveWorkshopId } from '../shared/apsMasterData';
 import React, { useState, useMemo } from 'react';
 import {
   FileSpreadsheet,
@@ -100,7 +101,7 @@ export const PlanDeviationMatrix: React.FC<PlanDeviationMatrixProps> = ({
       if (filterType === 'PENDING_REASON' && !dev.requiresReason) return false;
       if (filterType === 'RESOLVED' && (!isAnomaly || !b.is_reason_submitted)) return false;
 
-      const bWs = b.workshop_id || (b.assigned_reactor_id === 'R-6000-02' || b.assigned_reactor_id === 'R-6000-03' ? 'WS-02' : 'WS-01');
+      const bWs = b.workshop_id || (resolveWorkshopId(b.assigned_reactor_id));
       if (selectedWorkshop !== 'ALL' && bWs !== selectedWorkshop) {
         return false;
       }
