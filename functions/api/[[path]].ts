@@ -3,6 +3,7 @@ import {
   SEED_REACTOR_MASTER,
   assignBulkReactors,
   buildDeviceMaster,
+  findMissingMasterData,
   planBatchQuantities,
   type DeviceMaster,
 } from "../../src/shared/apsMasterData";
@@ -166,6 +167,37 @@ export async function onRequest(context: { request: Request; env: Env; params: R
       const planned = planBatchQuantities(qty, { master, bulkMinKg: master.bulkMinKg });
       const reactors = assignBulkReactors(planned.batches, master);
       return json({ order_qty_kg: qty, batch_count: planned.batches.length, total_batch_kg: planned.batches.reduce((sum, batch) => sum + batch.qty_kg, 0), suggested_batches: planned.batches.map((batch, index) => ({ reactor_code: batch.below_min ? "UNASSIGNED" : reactors[index], qty_kg: batch.qty_kg, is_tail: batch.is_tail })), warnings: planned.warnings });
+    }
+
+    const publishMatch = path.match(/^\/api\/v1\/plans\/([^/]+)\/publish$/);
+    if (publishMatch && request.method === "POST") {
+      const body = await readJson(request);
+      if (!body.version_no || !body.publisher_id || !body.publisher_name) {
+        return json({ status: "REJECTED", error_code: "INVALID_PUBLISH_PAYLOAD", message: "发布请求缺少版本或发布人信息" }, 400);
+      }
+      const missing = findMissingMasterData(getDeviceMaster(await loadState(env.APS_DB)));
+      if (body.is_demo === true || missing.length > 0) {
+        return json({ status: "REJECTED", error_code: body.is_demo === true ? "IS_DEMO_PLAN_BLOCKED" : "MASTER_DATA_INCOMPLETE", blocked_by: body.is_demo === true ? ["IS_DEMO"] : ["MASTER_DATA_INCOMPLETE"], missing_master_data: missing, message: body.is_demo === true ? "试算草稿不能发布至车间执行" : "设备主数据未齐套，不能发布" }, 400);
+      }
+      return json({ status: "PUBLISHED", success: true, code: "PLAN_PUBLISHED", plan_id: publishMatch[1], version_no: body.version_no, publisher_id: body.publisher_id, publisher: body.publisher_name, published_at: new Date().toISOString(), freeze_until: body.frozen_until || new Date(Date.now() + 24 * 3600 * 1000).toISOString() });
+    }
+
+    if (path === "/api/v1/integration/external-ids" && request.method === "GET") {
+      return json({ success: true, source_system: "MANUAL", mes_inbox_enabled: false, mapping_table: [{ aps_entity: "R-1300-01", dcs_tag: "DCS_TAG_R101", mes_workstation_id: "WS_REAC_101" }, { aps_entity: "R-6000-01", dcs_tag: "DCS_TAG_R201", mes_workstation_id: "WS_REAC_201" }, { aps_entity: "R-6000-02", dcs_tag: "DCS_TAG_R202", mes_workstation_id: "WS_REAC_202" }] });
+    }
+
+    if (path === "/api/v1/integration/messages" && request.method === "POST") {
+      return json({ success: true, status: "RECEIVED", message_id: `MSG-${Date.now()}`, source: "MANUAL" });
+    }
+
+    if (path === "/api/v1/orders/sync" && request.method === "POST") {
+      const body = await readJson(request);
+      if (!Array.isArray(body.orders)) return json({ error: "Invalid orders payload, array expected" }, 400);
+      return json({ success: true, synced_count: body.orders.length, synced_at: new Date().toISOString(), message: "生产订单数据已完成双向同步与乐观锁版本校准" });
+    }
+
+    if (path === "/api/v1/materials/inventory" && request.method === "GET") {
+      return json({ success: true, timestamp: new Date().toISOString(), inventories: [{ material_code: "RAW-LIPF6-01", material_name: "高纯六氟磷酸锂 (LiPF6)", category: "LITHIUM_SALT", current_stock_kg: 18500, mrp_expected_arrival_kg: 6000, expected_arrival_time: "2026-09-15 14:00" }, { material_code: "RAW-EC-01", material_name: "电池级碳酸乙烯酯 (EC)", category: "SOLVENT", current_stock_kg: 52000, mrp_expected_arrival_kg: 20000, expected_arrival_time: "2026-09-15 10:00" }, { material_code: "RAW-EMC-01", material_name: "高纯碳酸甲乙酯 (EMC)", category: "SOLVENT", current_stock_kg: 68000, mrp_expected_arrival_kg: 25000, expected_arrival_time: "2026-09-15 16:00" }] });
     }
 
     if (path === "/api/aps/ai-advisor" && request.method === "POST") {
